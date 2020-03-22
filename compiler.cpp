@@ -16,6 +16,11 @@ struct Application {
 	std::vector<Expression> arguments;
 };
 
+struct Definition {
+	std::string_view name;
+	Expression expression;
+};
+
 Expression parseExpression(std::string_view& view) {
 	if(view.empty()) {
 		throw std::runtime_error("Invalid empty expression");
@@ -50,18 +55,30 @@ Expression parseExpression(std::string_view& view) {
 		Application app;
 		app.name = view.substr(0, term);
 
-		view = view.substr(term);
-		while(!view.empty() && view[0] == ' ') {
+		// special case: function definition
+		if(app.name == "define") {
+			auto term = view.find_first_of(" )");
+			if(term == view.npos || view[term] == ')') {
+				throw std::runtime_error("Invalid define");
+			}
+
+			auto dname = view.substr(0, term);
+			view = view.substr(term);
+			auto e = parseExpression(view);
+		} else {
+			view = view.substr(term);
+			while(!view.empty() && view[0] == ' ') {
+				view = view.substr(1);
+				app.arguments.push_back(parseExpression(view));
+			}
+
+			if(view[0] != ')') {
+				throw std::runtime_error("Invalid termination of expression");
+			}
+
 			view = view.substr(1);
-			app.arguments.push_back(parseExpression(view));
+			return {app};
 		}
-
-		if(view[0] != ')') {
-			throw std::runtime_error("Invalid termination of expression");
-		}
-
-		view = view.substr(1);
-		return {app};
 	}
 
 	throw std::runtime_error("Invalid expression");
@@ -313,6 +330,7 @@ std::vector<u32> compile(const Expression& expr) {
 	// entry point function
 	write(ctx.buf, spv::OpFunction, ctx.types.tvoid, idmain,
 		spv::FunctionControlMaskNone, idmaintype);
+	write(ctx.buf, spv::OpLabel, ++ctx.id);
 
 	auto ret = generate(ctx, expr);
 	if(ret.type.index() != 0 || std::get<0>(ret.type) != PrimitiveType::eVoid) {
@@ -342,7 +360,7 @@ std::vector<u32> compile(const Expression& expr) {
 			output.location);
 	}
 
-	header[boundidx] = ctx.id;
+	header[boundidx] = ctx.id + 1;
 
 	// join buffers
 	header.insert(header.end(), sec8.begin(), sec8.end());
