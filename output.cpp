@@ -7,6 +7,7 @@
 #include <variant>
 #include <cassert>
 #include <iostream>
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 
@@ -63,7 +64,89 @@ u32 write(std::vector<u32>& buf, spv::Op opcode, Args&&... args) {
 	return wordCount;
 }
 
-GenExpr generate(Codegen& ctx, const Expression& expr) {
+GenExpr generateCall(Codegen& ctx, const Expression& expr,
+		const std::vector<Expression>& args,
+		const std::vector<Definition>& defs) {
+	if(expr.index() == 0 || expr.index() == 1) {
+		throw std::runtime_error("Invalid application; no function");
+	}
+
+	// application
+	if(expr.index() == 2) {
+		auto fname = std::get<Identifier>(expr).name;
+		if(fname == "+") {
+			if(args.size() != 3) {
+				throw std::runtime_error("+ expects 2 arguments");
+			}
+
+			auto e1 = generate(ctx, args[1], defs);
+			auto e2 = generate(ctx, args[2], defs);
+			// TODO: check if type is addable
+			// if(e1.type != e2.type) {
+			// 	throw std::runtime_error("Addition arguments must have same type");
+			// }
+
+			auto oid = ++ctx.id;
+			write(ctx.buf, spv::OpFAdd, e1.idtype, oid, e1.id, e2.id);
+			return {oid, e1.idtype, e1.type};
+		} else if(fname == "vec4") {
+			if(args.size() != 5) {
+				throw std::runtime_error("vec4 expects 4 arguments");
+			}
+
+			auto e1 = generate(ctx, args[1], defs);
+			auto e2 = generate(ctx, args[2], defs);
+			auto e3 = generate(ctx, args[3], defs);
+			auto e4 = generate(ctx, args[4], defs);
+
+			// TODO: check that all types are floats
+
+			auto oid = ++ctx.id;
+			write(ctx.buf, spv::OpCompositeConstruct, ctx.types.tvec4,
+				oid, e1.id, e2.id, e3.id, e4.id);
+
+			auto type = VectorType{4, PrimitiveType::eFloat};
+			return {oid, ctx.types.tvec4, type};
+		} else if(fname == "output") {
+			if(args.size() != 3) {
+				throw std::runtime_error("output expects 2 arguments");
+			}
+
+			auto& a1 = args[1];
+			if(a1.index() != 0) {
+				throw std::runtime_error("First argument of output must be int");
+			}
+
+			auto e1 = generate(ctx, args[2], defs);
+
+			unsigned output = std::get<0>(a1);
+			auto oid = ++ctx.id;
+			ctx.outputs.push_back({oid, output, e1.idtype});
+
+			write(ctx.buf, spv::OpStore, oid, e1.id);
+
+			return {0, 0, PrimitiveType::eVoid};
+		} else {
+			auto it = std::find_if(defs.begin(), defs.end(), [&](auto name){
+				return name == fname;
+			});
+			if(it == defs.end()) {
+				std::string msg = "Unknown function identifier '";
+				msg += fname;
+				msg += "'";
+				throw std::runtime_error(msg);
+			}
+
+			generateCall(ctx, it->expression, args, defs);
+		}
+	}
+}
+
+
+GenExpr generate(Codegen& ctx, const Expression& expr,
+		const std::vector<Definition>& defs) {
+
+	// constant number
 	if(expr.index() == 0) {
 		float val = std::get<0>(expr);
 		u32 v;
@@ -76,72 +159,95 @@ GenExpr generate(Codegen& ctx, const Expression& expr) {
 		return {oid, ctx.types.tf32, PrimitiveType::eFloat};
 	}
 
-	// TODO
+	// TODO: constant string
 	if(expr.index() == 1) {
 		throw std::runtime_error("Can't generate string");
 	}
 
-	if(expr.index() == 3) {
-		auto& def = std::get<3>(expr);
-		return generate(ctx, def->expression);
-	}
+	// identifier
+	// if(expr.index() == 3) {
+	// 	auto& def = std::get<3>(expr);
+	// 	return generate(ctx, def->expression);
+	// }
 
 	auto& app = std::get<2>(expr);
-	if(app.name == "+") {
-		if(app.arguments.size() != 2) {
-			throw std::runtime_error("+ expects 2 arguments");
-		}
-
-		auto e1 = generate(ctx, app.arguments[0]);
-		auto e2 = generate(ctx, app.arguments[1]);
-		// TODO: check if type is addable
-		// if(e1.type != e2.type) {
-		// 	throw std::runtime_error("Addition arguments must have same type");
-		// }
-
-		auto oid = ++ctx.id;
-		write(ctx.buf, spv::OpFAdd, e1.idtype, oid, e1.id, e2.id);
-		return {oid, e1.idtype, e1.type};
-	} else if(app.name == "vec4") {
-		if(app.arguments.size() != 4) {
-			throw std::runtime_error("vec4 expects 4 arguments");
-		}
-
-		auto e1 = generate(ctx, app.arguments[0]);
-		auto e2 = generate(ctx, app.arguments[1]);
-		auto e3 = generate(ctx, app.arguments[2]);
-		auto e4 = generate(ctx, app.arguments[3]);
-
-		// TODO: check that all types are floats
-
-		auto oid = ++ctx.id;
-		write(ctx.buf, spv::OpCompositeConstruct, ctx.types.tvec4,
-			oid, e1.id, e2.id, e3.id, e4.id);
-
-		auto type = VectorType{4, PrimitiveType::eFloat};
-		return {oid, ctx.types.tvec4, type};
-	} else if(app.name == "output") {
-		if(app.arguments.size() != 2) {
-			throw std::runtime_error("output expects 2 arguments");
-		}
-
-		auto& a1 = app.arguments[0];
-		if(a1.index() != 0) {
-			throw std::runtime_error("First argument of output must be int");
-		}
-
-		auto e1 = generate(ctx, app.arguments[1]);
-
-		unsigned output = std::get<0>(a1);
-		auto oid = ++ctx.id;
-		ctx.outputs.push_back({oid, output, e1.idtype});
-
-		write(ctx.buf, spv::OpStore, oid, e1.id);
-
-		return {0, 0, PrimitiveType::eVoid};
+	if(app.values.size() < 2) {
+		throw std::runtime_error("Cant generate empty or single application");
 	}
 
-	throw std::runtime_error("Unknown function");
+	auto func = app.values[0];
+	if(func.index() == 3) {
+		auto fname = std::get<Identifier>(func).name;
+		if(fname == "+") {
+			if(app.values.size() != 3) {
+				throw std::runtime_error("+ expects 2 arguments");
+			}
+
+			auto e1 = generate(ctx, app.values[1], defs);
+			auto e2 = generate(ctx, app.values[2], defs);
+			// TODO: check if type is addable
+			// if(e1.type != e2.type) {
+			// 	throw std::runtime_error("Addition arguments must have same type");
+			// }
+
+			auto oid = ++ctx.id;
+			write(ctx.buf, spv::OpFAdd, e1.idtype, oid, e1.id, e2.id);
+			return {oid, e1.idtype, e1.type};
+		} else if(fname == "vec4") {
+			if(app.values.size() != 5) {
+				throw std::runtime_error("vec4 expects 4 arguments");
+			}
+
+			auto e1 = generate(ctx, app.values[1], defs);
+			auto e2 = generate(ctx, app.values[2], defs);
+			auto e3 = generate(ctx, app.values[3], defs);
+			auto e4 = generate(ctx, app.values[4], defs);
+
+			// TODO: check that all types are floats
+
+			auto oid = ++ctx.id;
+			write(ctx.buf, spv::OpCompositeConstruct, ctx.types.tvec4,
+				oid, e1.id, e2.id, e3.id, e4.id);
+
+			auto type = VectorType{4, PrimitiveType::eFloat};
+			return {oid, ctx.types.tvec4, type};
+		} else if(fname == "output") {
+			if(app.values.size() != 3) {
+				throw std::runtime_error("output expects 2 arguments");
+			}
+
+			auto& a1 = app.values[1];
+			if(a1.index() != 0) {
+				throw std::runtime_error("First argument of output must be int");
+			}
+
+			auto e1 = generate(ctx, app.values[2], defs);
+
+			unsigned output = std::get<0>(a1);
+			auto oid = ++ctx.id;
+			ctx.outputs.push_back({oid, output, e1.idtype});
+
+			write(ctx.buf, spv::OpStore, oid, e1.id);
+
+			return {0, 0, PrimitiveType::eVoid};
+		} else {
+			auto it = std::find_if(defs.begin(), defs.end(), [&](auto name){
+				return name == fname;
+			});
+			if(it == defs.end()) {
+				std::string msg = "Unknown function identifier '";
+				msg += fname;
+				msg += "'";
+				throw std::runtime_error(msg);
+			}
+
+			generateCall(ctx, it->expression, app.values, defs);
+		}
+	} else if(func.index() == 2) {
+		generateCall(ctx, func, app.values, defs);
+	}
+
+	throw std::runtime_error("Invalid application expression");
 }
 
 void init(Codegen& ctx) {

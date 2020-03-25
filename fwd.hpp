@@ -6,19 +6,18 @@
 #include <vector>
 
 // AST
-struct Application;
+struct List;
 struct Definition;
 struct Identifier;
 
-using Expression = std::variant<double, std::string_view, Application, Identifier>;
+using Expression = std::variant<double, std::string_view, List, Identifier>;
 
 struct Identifier {
 	std::string_view name;
 };
 
-struct Application {
-	Expression func;
-	std::vector<Expression> arguments;
+struct List {
+	std::vector<Expression> values;
 };
 
 struct Definition {
@@ -84,5 +83,6 @@ struct Codegen {
 };
 
 void init(Codegen& ctx);
-GenExpr generate(Codegen& ctx, const Expression& expr);
+GenExpr generate(Codegen& ctx, const Expression& expr,
+		const std::vector<Definition>& defs);
 std::vector<u32> finish(Codegen& ctx);
