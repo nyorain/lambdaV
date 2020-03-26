@@ -9,15 +9,24 @@
 struct List;
 struct Definition;
 struct Identifier;
+struct Expression;
 
-using Expression = std::variant<double, std::string_view, List, Identifier>;
+struct Location {
+	unsigned row {0};
+	unsigned col {0};
+};
+
+struct List {
+	std::vector<Expression> values;
+};
 
 struct Identifier {
 	std::string_view name;
 };
 
-struct List {
-	std::vector<Expression> values;
+struct Expression {
+	std::variant<double, std::string_view, List, Identifier> value;
+	Location loc;
 };
 
 struct Definition {
@@ -41,6 +50,8 @@ struct MatrixType {
 };
 
 using Type = std::variant<PrimitiveType, VectorType, MatrixType>;
+
+[[noreturn]] void throwError(std::string msg, const Location& loc);
 
 // Codegen
 using u32 = std::uint32_t;

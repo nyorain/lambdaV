@@ -11,7 +11,10 @@ project(
 	],
 )
 
+dep_dlg = dependency('dlg', fallback: ['dlg', 'dlg_dep'])
+
 executable('lambdav', [
 		'compiler.cpp',
 		'output.cpp',
-	])
+	],
+	dependencies: dep_dlg)
