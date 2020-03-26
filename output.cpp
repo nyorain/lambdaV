@@ -70,11 +70,163 @@ u32 write(std::vector<u32>& buf, spv::Op opcode, Args&&... args) {
 	return wordCount;
 }
 
+// Recursive generation
+GenExpr generateCall(Codegen& ctx, const Expression& expr,
+		const std::vector<const std::vector<Expression>*>& args,
+		const std::vector<Definition>& defs);
+
+using BuiltinGen = GenExpr(*)(Codegen& ctx, const Location& loc,
+		const std::vector<const std::vector<Expression>*>& args,
+		const std::vector<Definition>& defs);
+
+GenExpr generateIf(Codegen& ctx, const Location& loc,
+		const std::vector<const std::vector<Expression>*>& args,
+		const std::vector<Definition>& defs) {
+	if(args.empty()) {
+		throwError("Invalid call nesting", loc);
+	}
+
+	if(args.back()->size() != 4) {
+		throwError("If needs 3 arguments", loc);
+	}
+
+	auto cond = generate(ctx, (*args.back())[1], defs);
+	if(cond.idtype != ctx.types.tbool) {
+		throwError("if condition must be bool", loc);
+	}
+
+	auto nargs = args;
+	nargs.pop_back();
+
+	auto tlabel = ++ctx.id;
+	auto flabel = ++ctx.id;
+	auto dstlabel = ++ctx.id;
+
+	write(ctx.buf, spv::OpSelectionMerge, dstlabel, spv::SelectionControlMaskNone);
+	write(ctx.buf, spv::OpBranchConditional, cond.id, tlabel, flabel);
+
+	// true label
+	write(ctx.buf, spv::OpLabel, tlabel);
+	auto et = generateCall(ctx, (*args.back())[2], nargs, defs);
+	write(ctx.buf, spv::OpBranch, dstlabel);
+
+	// false label
+	write(ctx.buf, spv::OpLabel, flabel);
+	auto ef = generateCall(ctx, (*args.back())[3], nargs, defs);
+	write(ctx.buf, spv::OpBranch, dstlabel);
+
+	if(et.idtype != ef.idtype) {
+		throwError("if branches have different types", loc);
+	}
+
+	// phi
+	write(ctx.buf, spv::OpLabel, dstlabel);
+	auto phi = ++ctx.id;
+	write(ctx.buf, spv::OpPhi, et.idtype, phi,
+		et.id, tlabel, ef.id, flabel);
+	return {phi, et.idtype, et.type};
+}
+
+template<spv::Op Op>
+GenExpr generateBinop(Codegen& ctx, const Location& loc,
+		const std::vector<const std::vector<Expression>*>& args,
+		const std::vector<Definition>& defs) {
+	if(args.size() != 1) {
+		throwError("Invalid call nesting", loc);
+	}
+
+	if(args[0]->size() != 3) {
+		std::string msg = "binop";
+		msg += " expects 2 arguments";
+		throwError(msg, loc);
+	}
+
+	auto e1 = generate(ctx, (*args[0])[1], defs);
+	auto e2 = generate(ctx, (*args[0])[2], defs);
+	if(e1.idtype != e2.idtype) {
+		std::string msg = "binop";
+		msg += " arguments must have same type";
+		throwError(msg, loc);
+	}
+
+	auto oid = ++ctx.id;
+	write(ctx.buf, Op, e1.idtype, oid, e1.id, e2.id);
+	return {oid, e1.idtype, e1.type};
+}
+
+GenExpr generateVec4(Codegen& ctx, const Location& loc,
+		const std::vector<const std::vector<Expression>*>& args,
+		const std::vector<Definition>& defs) {
+	if(args.size() != 1) {
+		throwError("Invalid call nesting", loc);
+	}
+
+	if(args[0]->size() != 5) {
+		throwError("vec4 expects 4 arguments", loc);
+	}
+
+	std::vector<u32> ids;
+	auto e1 = generate(ctx, (*args[0])[1], defs);
+	auto e2 = generate(ctx, (*args[0])[2], defs);
+	auto e3 = generate(ctx, (*args[0])[3], defs);
+	auto e4 = generate(ctx, (*args[0])[4], defs);
+
+	// TODO: check that all types are floats
+
+	auto oid = ++ctx.id;
+	write(ctx.buf, spv::OpCompositeConstruct, ctx.types.tvec4,
+		oid, e1.id, e2.id, e3.id, e4.id);
+
+	auto type = VectorType{4, PrimitiveType::eFloat};
+	return {oid, ctx.types.tvec4, type};
+}
+
+GenExpr generateOutput(Codegen& ctx, const Location& loc,
+		const std::vector<const std::vector<Expression>*>& args,
+		const std::vector<Definition>& defs) {
+	if(args.size() != 1) {
+		throwError("Invalid call nesting", loc);
+	}
+
+	if(args[0]->size() != 3) {
+		throwError("output expects 2 arguments", loc);
+	}
+
+	auto& a1 = (*args[0])[1];
+	if(a1.value.index() != 0) {
+		throwError("First argument of output must be int", a1.loc);
+	}
+
+	auto e1 = generate(ctx, (*args[0])[2], defs);
+
+	unsigned output = std::get<0>(a1.value);
+	auto oid = ++ctx.id;
+	ctx.outputs.push_back({oid, output, e1.idtype});
+
+	write(ctx.buf, spv::OpStore, oid, e1.id);
+
+	return {0, 0, PrimitiveType::eVoid};
+}
+
+const std::unordered_map<std::string_view, BuiltinGen> builtins = {
+	{"if", generateIf},
+	{"output", generateOutput},
+	{"+", &generateBinop<spv::OpFAdd>},
+	{"-", generateBinop<spv::OpFSub>},
+	{"*", generateBinop<spv::OpFMul>},
+	{"/", generateBinop<spv::OpFDiv>},
+	{"vec4", generateVec4},
+};
+
 GenExpr generateCall(Codegen& ctx, const Expression& expr,
 		const std::vector<const std::vector<Expression>*>& args,
 		const std::vector<Definition>& defs) {
+	if(args.empty()) {
+		return generate(ctx, expr, defs);
+	}
+
 	auto& ev = expr.value;
-	if(ev.index() == 0 || ev.index() == 1) {
+	if(ev.index() == 0 || ev.index() == 1 || ev.index() == 4) {
 		throwError("Invalid application; no function", expr.loc);
 	}
 
@@ -128,74 +280,11 @@ GenExpr generateCall(Codegen& ctx, const Expression& expr,
 		return generateCall(ctx, list.values[0], nargs, defs);
 	}
 
-	// identifier
+	// identifier: must either be builtin or defined function
 	if(ev.index() == 3) {
 		auto fname = std::get<Identifier>(ev).name;
-		if(fname == "+") {
-			if(args.size() != 1) {
-				throwError("Invalid call nesting", expr.loc);
-			}
-
-			if(args[0]->size() != 3) {
-				throwError("+ expects 2 arguments", expr.loc);
-			}
-
-			auto e1 = generate(ctx, (*args[0])[1], defs);
-			auto e2 = generate(ctx, (*args[0])[2], defs);
-			// TODO: check if type is addable
-			// if(e1.type != e2.type) {
-			// 	throw std::runtime_error("Addition arguments must have same type");
-			// }
-
-			auto oid = ++ctx.id;
-			write(ctx.buf, spv::OpFAdd, e1.idtype, oid, e1.id, e2.id);
-			return {oid, e1.idtype, e1.type};
-		} else if(fname == "vec4") {
-			if(args.size() != 1) {
-				throwError("Invalid call nesting", expr.loc);
-			}
-
-			if(args[0]->size() != 5) {
-				throwError("vec4 expects 4 arguments", expr.loc);
-			}
-
-			auto e1 = generate(ctx, (*args[0])[1], defs);
-			auto e2 = generate(ctx, (*args[0])[2], defs);
-			auto e3 = generate(ctx, (*args[0])[3], defs);
-			auto e4 = generate(ctx, (*args[0])[4], defs);
-
-			// TODO: check that all types are floats
-
-			auto oid = ++ctx.id;
-			write(ctx.buf, spv::OpCompositeConstruct, ctx.types.tvec4,
-				oid, e1.id, e2.id, e3.id, e4.id);
-
-			auto type = VectorType{4, PrimitiveType::eFloat};
-			return {oid, ctx.types.tvec4, type};
-		} else if(fname == "output") {
-			if(args.size() != 1) {
-				throwError("Invalid call nesting", expr.loc);
-			}
-
-			if(args[0]->size() != 3) {
-				throwError("output expects 2 arguments", expr.loc);
-			}
-
-			auto& a1 = (*args[0])[1];
-			if(a1.value.index() != 0) {
-				throwError("First argument of output must be int", a1.loc);
-			}
-
-			auto e1 = generate(ctx, (*args[0])[2], defs);
-
-			unsigned output = std::get<0>(a1.value);
-			auto oid = ++ctx.id;
-			ctx.outputs.push_back({oid, output, e1.idtype});
-
-			write(ctx.buf, spv::OpStore, oid, e1.id);
-
-			return {0, 0, PrimitiveType::eVoid};
-		} else {
+		auto it = builtins.find(fname);
+		if(it == builtins.end()) {
 			auto it = std::find_if(defs.begin(), defs.end(), [&](auto def){
 				return def.name == fname;
 			});
@@ -207,6 +296,8 @@ GenExpr generateCall(Codegen& ctx, const Expression& expr,
 			}
 
 			return generateCall(ctx, it->expression, args, defs);
+		} else {
+			return it->second(ctx, expr.loc, args, defs);
 		}
 	}
 
@@ -217,17 +308,22 @@ GenExpr generateCall(Codegen& ctx, const Expression& expr,
 GenExpr generate(Codegen& ctx, const Expression& expr,
 		const std::vector<Definition>& defs) {
 
+	// all constants have to be declared at the start of the program
+	// and we therefore backpatch them to the start later on
 	// constant number
-	if(expr.value.index() == 0) {
-		float val = std::get<0>(expr.value);
+	if(auto* val = std::get_if<double>(&expr.value)) {
 		u32 v;
-		std::memcpy(&v, &val, 4);
-
-		// all constants have to be declared at the start of the program
-		// and we therefore backpatch them to the start later on
+		float f = *val;
+		std::memcpy(&v, &f, 4);
 		auto oid = ++ctx.id;
 		ctx.constants.push_back({oid, v, ctx.types.tf32});
 		return {oid, ctx.types.tf32, PrimitiveType::eFloat};
+	}
+
+	// constant bool
+	if(auto* val = std::get_if<bool>(&expr.value)) {
+		u32 id = *val ? ctx.idtrue : ctx.idfalse;
+		return {id, ctx.types.tbool, PrimitiveType::eBool};
 	}
 
 	// TODO: constant string
@@ -262,10 +358,13 @@ void init(Codegen& ctx) {
 	ctx.idmain = ++ctx.id;
 	ctx.idmaintype = ++ctx.id;
 	ctx.idglsl = ++ctx.id;
+	ctx.idtrue = ++ctx.id;
+	ctx.idfalse = ++ctx.id;
 
 	ctx.types.tf32 = ++ctx.id;
 	ctx.types.tvoid = ++ctx.id;
 	ctx.types.tvec4 = ++ctx.id;
+	ctx.types.tbool = ++ctx.id;
 
 	// entry point function
 	write(ctx.buf, spv::OpFunction, ctx.types.tvoid, ctx.idmain,
@@ -311,7 +410,11 @@ std::vector<u32> finish(Codegen& ctx) {
 	write(sec9, spv::OpTypeFloat, ctx.types.tf32, 32);
 	write(sec9, spv::OpTypeVoid, ctx.types.tvoid);
 	write(sec9, spv::OpTypeVector, ctx.types.tvec4, ctx.types.tf32, 4);
+	write(sec9, spv::OpTypeBool, ctx.types.tbool);
 	write(sec9, spv::OpTypeFunction, ctx.idmaintype, ctx.types.tvoid);
+
+	write(sec9, spv::OpConstantTrue, ctx.types.tbool, ctx.idtrue);
+	write(sec9, spv::OpConstantFalse, ctx.types.tbool, ctx.idfalse);
 
 	// back-patch the missed global stuff
 	for(auto& constant : ctx.constants) {

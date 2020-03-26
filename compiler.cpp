@@ -96,6 +96,12 @@ Expression parseExpression(std::string_view& view, Location& loc) {
 	}
 
 	auto name = consume(view, term, loc);
+	if(name == "true") {
+		return {true, oloc};
+	} else if(name == "false") {
+		return {false, oloc};
+	}
+
 	return {Identifier{name}, oloc};
 }
 
@@ -103,8 +109,10 @@ std::string dump(const Expression& expr) {
 	switch(expr.value.index()) {
 		case 0: return std::to_string(std::get<0>(expr.value));
 		case 1: return std::string(std::get<1>(expr.value));
+		case 2: break;
 		case 3: return std::string(std::get<3>(expr.value).name);
-		default: break;
+		case 4: return std::to_string(std::get<4>(expr.value));
+		default: return "<invalid expr>";
 	}
 
 	auto& app = std::get<2>(expr.value);
@@ -137,7 +145,7 @@ const std::string source = R"SRC(
 	(define plus (func (x y) ((plusc x) y)))
 	(define plus2 (func (x) (plus x 2)))
 
-	(define white (vec4 (plus2 -1) 1.0 0.4 1.0))
+	(define white (vec4 (if true (plus2 -1) 0) 1.0 0.4 1.0))
 	(output 0 white)
 )SRC";
 
@@ -161,6 +169,7 @@ int main() {
 				throwError("Define needs 2 arguments", expr.loc);
 			}
 
+			// TODO: check name for keywords/builtins?
 			auto name = std::get<3>(list->values[1].value).name;
 			std::cout << "define: " << name << " " << dump(list->values[2]) << "\n";
 			defs.push_back({name, list->values[2]});

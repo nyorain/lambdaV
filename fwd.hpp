@@ -25,7 +25,7 @@ struct Identifier {
 };
 
 struct Expression {
-	std::variant<double, std::string_view, List, Identifier> value;
+	std::variant<double, std::string_view, List, Identifier, bool> value;
 	Location loc;
 };
 
@@ -37,6 +37,7 @@ struct Definition {
 enum class PrimitiveType {
 	eVoid,
 	eFloat,
+	eBool,
 };
 
 struct VectorType {
@@ -71,10 +72,14 @@ struct Codegen {
 	u32 idmaintype;
 	u32 idglsl;
 
+	u32 idtrue;
+	u32 idfalse;
+
 	struct {
 		u32 tf32 {};
 		u32 tvec4 {};
 		u32 tvoid {};
+		u32 tbool {};
 	} types;
 
 	struct Output {
