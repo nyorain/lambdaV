@@ -70,163 +70,339 @@ u32 write(std::vector<u32>& buf, spv::Op opcode, Args&&... args) {
 	return wordCount;
 }
 
+struct BackEdge {
+	u32 block;
+	std::vector<u32> params;
+};
+
+struct RecData {
+	u32 header;
+	u32 cont;
+
+	std::vector<u32> paramTypes;
+	std::vector<BackEdge> loops;
+};
+
+struct RecContext : public Context {
+	RecData* rec {}; // information about the deepest level of rec-func
+};
+
+struct CallArgs {
+	const std::vector<Expression>* values;
+	const Defs* defs;
+};
+
 // Recursive generation
-GenExpr generateCall(Codegen& ctx, const Expression& expr,
-		const std::vector<const std::vector<Expression>*>& args,
-		const std::vector<Definition>& defs);
+GenExpr generateCall(const RecContext& ctx, const Expression& expr,
+		const std::vector<CallArgs>& args);
+GenExpr generate(const RecContext& ctx, const Expression& expr);
 
-using BuiltinGen = GenExpr(*)(Codegen& ctx, const Location& loc,
-		const std::vector<const std::vector<Expression>*>& args,
-		const std::vector<Definition>& defs);
+using BuiltinGen = GenExpr(*)(const RecContext& ctx, const Location& loc,
+		const std::vector<CallArgs>& args);
 
-GenExpr generateIf(Codegen& ctx, const Location& loc,
-		const std::vector<const std::vector<Expression>*>& args,
-		const std::vector<Definition>& defs) {
+GenExpr generateIf(const RecContext& ctx, const Location& loc,
+		const std::vector<CallArgs>& args) {
 	if(args.empty()) {
 		throwError("Invalid call nesting", loc);
 	}
 
-	if(args.back()->size() != 4) {
-		throwError("If needs 3 arguments", loc);
+	if(args.back().values->size() != 4) {
+		throwError("'if' needs 3 arguments", loc);
 	}
 
-	auto cond = generate(ctx, (*args.back())[1], defs);
-	if(cond.idtype != ctx.types.tbool) {
-		throwError("if condition must be bool", loc);
+	auto cond = generate(ctx, (*args.back().values)[1]);
+	if(cond.idtype != ctx.codegen.types.tbool) {
+		throwError("'if' condition (first arg) must be bool", loc);
 	}
 
 	auto nargs = args;
 	nargs.pop_back();
 
-	auto tlabel = ++ctx.id;
-	auto flabel = ++ctx.id;
-	auto dstlabel = ++ctx.id;
+	auto tlabel = ++ctx.codegen.id;
+	auto flabel = ++ctx.codegen.id;
+	auto dstlabel = ++ctx.codegen.id;
 
-	write(ctx.buf, spv::OpSelectionMerge, dstlabel, spv::SelectionControlMaskNone);
-	write(ctx.buf, spv::OpBranchConditional, cond.id, tlabel, flabel);
+	auto& buf = ctx.codegen.buf;
+	write(buf, spv::OpSelectionMerge, dstlabel, spv::SelectionControlMaskNone);
+	write(buf, spv::OpBranchConditional, cond.id, tlabel, flabel);
+
+	auto nctx = RecContext {ctx.codegen, *args.back().defs, ctx.rec};
 
 	// true label
-	write(ctx.buf, spv::OpLabel, tlabel);
-	auto et = generateCall(ctx, (*args.back())[2], nargs, defs);
-	write(ctx.buf, spv::OpBranch, dstlabel);
+	write(buf, spv::OpLabel, tlabel);
+	ctx.codegen.block = tlabel;
+	auto et = generateCall(nctx, (*args.back().values)[2], nargs);
 
-	// false label
-	write(ctx.buf, spv::OpLabel, flabel);
-	auto ef = generateCall(ctx, (*args.back())[3], nargs, defs);
-	write(ctx.buf, spv::OpBranch, dstlabel);
-
-	if(et.idtype != ef.idtype) {
-		throwError("if branches have different types", loc);
+	auto ptt = std::get_if<PrimitiveType>(&et.type);
+	auto rt = ptt && *ptt == PrimitiveType::eRecCall;
+	if(!rt) {
+		write(buf, spv::OpBranch, dstlabel);
 	}
 
-	// phi
-	write(ctx.buf, spv::OpLabel, dstlabel);
-	auto phi = ++ctx.id;
-	write(ctx.buf, spv::OpPhi, et.idtype, phi,
-		et.id, tlabel, ef.id, flabel);
-	return {phi, et.idtype, et.type};
+	// false label
+	write(buf, spv::OpLabel, flabel);
+	ctx.codegen.block = flabel;
+	auto ef = generateCall(nctx, (*args.back().values)[3], nargs);
+
+	auto ptf = std::get_if<PrimitiveType>(&ef.type);
+	auto rf = ptf && *ptf == PrimitiveType::eRecCall;
+	if(!rf) {
+		write(buf, spv::OpBranch, dstlabel);
+	}
+
+	// dst block
+	if(!rf || !rt) {
+		write(buf, spv::OpLabel, dstlabel);
+		ctx.codegen.block = dstlabel;
+	}
+
+	if(!rf && !rt) {
+		if(et.idtype != ef.idtype) {
+			throwError("if branches have different types", loc);
+		}
+
+		// otherwise we need phi instruction
+		auto phi = ++ctx.codegen.id;
+		write(buf, spv::OpPhi, et.idtype, phi,
+			et.id, tlabel, ef.id, flabel);
+
+		return {phi, et.idtype, et.type};
+
+	// if either type is RecCall, we can make it work
+	// TODO: we should propagate it if only one of the types
+	// is eRecCall. At the moment this is a silent error!
+	// Include a 'usable' or 'rec' flag in type.
+	} else if(rf) {
+		return {et.id, et.idtype, et.type};
+	} else if(rt) {
+		return {ef.id, ef.idtype, ef.type};
+	}
+
+	// otherwise: both branches are rec calls
+	return {0, 0, PrimitiveType::eRecCall};
 }
 
 template<spv::Op Op>
-GenExpr generateBinop(Codegen& ctx, const Location& loc,
-		const std::vector<const std::vector<Expression>*>& args,
-		const std::vector<Definition>& defs) {
+GenExpr generateBinop(const RecContext& ctx, const Location& loc,
+		const std::vector<CallArgs>& args) {
 	if(args.size() != 1) {
 		throwError("Invalid call nesting", loc);
 	}
 
-	if(args[0]->size() != 3) {
+	if(args[0].values->size() != 3) {
 		std::string msg = "binop";
 		msg += " expects 2 arguments";
 		throwError(msg, loc);
 	}
 
-	auto e1 = generate(ctx, (*args[0])[1], defs);
-	auto e2 = generate(ctx, (*args[0])[2], defs);
+	auto nctx = RecContext {ctx.codegen, *args.back().defs, ctx.rec};
+	auto e1 = generate(nctx, (*args[0].values)[1]);
+	auto e2 = generate(nctx, (*args[0].values)[2]);
 	if(e1.idtype != e2.idtype) {
 		std::string msg = "binop";
 		msg += " arguments must have same type";
 		throwError(msg, loc);
 	}
 
-	auto oid = ++ctx.id;
-	write(ctx.buf, Op, e1.idtype, oid, e1.id, e2.id);
+	auto oid = ++ctx.codegen.id;
+	write(ctx.codegen.buf, Op, e1.idtype, oid, e1.id, e2.id);
 	return {oid, e1.idtype, e1.type};
 }
 
-GenExpr generateVec4(Codegen& ctx, const Location& loc,
-		const std::vector<const std::vector<Expression>*>& args,
-		const std::vector<Definition>& defs) {
+GenExpr generateVec4(const RecContext& ctx, const Location& loc,
+		const std::vector<CallArgs>& args) {
 	if(args.size() != 1) {
 		throwError("Invalid call nesting", loc);
 	}
 
-	if(args[0]->size() != 5) {
+	if(args[0].values->size() != 5) {
 		throwError("vec4 expects 4 arguments", loc);
 	}
 
+	auto nctx = RecContext {ctx.codegen, *args.back().defs, ctx.rec};
+
 	std::vector<u32> ids;
-	auto e1 = generate(ctx, (*args[0])[1], defs);
-	auto e2 = generate(ctx, (*args[0])[2], defs);
-	auto e3 = generate(ctx, (*args[0])[3], defs);
-	auto e4 = generate(ctx, (*args[0])[4], defs);
+	auto e1 = generate(nctx, (*args[0].values)[1]);
+	auto e2 = generate(nctx, (*args[0].values)[2]);
+	auto e3 = generate(nctx, (*args[0].values)[3]);
+	auto e4 = generate(nctx, (*args[0].values)[4]);
 
 	// TODO: check that all types are floats
 
-	auto oid = ++ctx.id;
-	write(ctx.buf, spv::OpCompositeConstruct, ctx.types.tvec4,
+	auto oid = ++ctx.codegen.id;
+	write(ctx.codegen.buf, spv::OpCompositeConstruct, ctx.codegen.types.tvec4,
 		oid, e1.id, e2.id, e3.id, e4.id);
 
 	auto type = VectorType{4, PrimitiveType::eFloat};
-	return {oid, ctx.types.tvec4, type};
+	return {oid, ctx.codegen.types.tvec4, type};
 }
 
-GenExpr generateOutput(Codegen& ctx, const Location& loc,
-		const std::vector<const std::vector<Expression>*>& args,
-		const std::vector<Definition>& defs) {
+GenExpr generateOutput(const RecContext& ctx, const Location& loc,
+		const std::vector<CallArgs>& args) {
 	if(args.size() != 1) {
 		throwError("Invalid call nesting", loc);
 	}
 
-	if(args[0]->size() != 3) {
+	if(args[0].values->size() != 3) {
 		throwError("output expects 2 arguments", loc);
 	}
 
-	auto& a1 = (*args[0])[1];
+	auto& a1 = (*args[0].values)[1];
 	if(a1.value.index() != 0) {
 		throwError("First argument of output must be int", a1.loc);
 	}
 
-	auto e1 = generate(ctx, (*args[0])[2], defs);
+	auto nctx = RecContext {ctx.codegen, *args.back().defs, ctx.rec};
+	auto e1 = generate(nctx, (*args[0].values)[2]);
 
 	unsigned output = std::get<0>(a1.value);
-	auto oid = ++ctx.id;
-	ctx.outputs.push_back({oid, output, e1.idtype});
+	auto oid = ++ctx.codegen.id;
+	ctx.codegen.outputs.push_back({oid, output, e1.idtype});
 
-	write(ctx.buf, spv::OpStore, oid, e1.id);
-
+	write(ctx.codegen.buf, spv::OpStore, oid, e1.id);
 	return {0, 0, PrimitiveType::eVoid};
+}
+
+GenExpr generateLet(const RecContext& ctx, const Location& loc,
+		const std::vector<CallArgs>& args) {
+	if(args.empty()) {
+		throwError("Invalid call nesting", loc);
+	}
+
+	if(args.back().values->size() != 3) {
+		throwError("let expects two arguments", loc);
+	}
+
+	auto lets = std::get_if<List>(&(*args.back().values)[1].value);
+	if(!lets) {
+		throwError("first parameter of let must be list",
+			(*args.back().values)[1].loc);
+	}
+
+	auto ndefs = ctx.defs;
+	for(auto& def : lets->values) {
+		auto list = std::get_if<List>(&def.value);
+		if(!list || list->values.size() != 2) {
+			throwError("bindings in let must be (identifier expr) pairs",
+				def.loc);
+		}
+
+		auto identifier = std::get_if<Identifier>(&list->values[0].value);
+		if(!identifier) {
+			throwError("bindings in let must be (identifier expr) pairs",
+				list->values[0].loc);
+		}
+
+		ndefs.insert_or_assign(identifier->name, DefExpr{list->values[1], &ctx.defs});
+	}
+
+	auto nctx = RecContext{ctx.codegen, ndefs, ctx.rec};
+
+	auto nargs = args;
+	nargs.pop_back();
+
+	auto& body = (*args.back().values)[2];
+	return generateCall(nctx, body, nargs);
+}
+
+GenExpr generateEq(const RecContext& ctx, const Location& loc,
+		const std::vector<CallArgs>& args) {
+	if(args.size() != 1) {
+		throwError("Invalid call nesting", loc);
+	}
+
+	if(args[0].values->size() != 3) {
+		std::string msg = "eq expects 2 arguments";
+		throwError(msg, loc);
+	}
+
+	auto nctx = RecContext {ctx.codegen, *args.back().defs, ctx.rec};
+	auto e1 = generate(nctx, (*args[0].values)[1]);
+	auto e2 = generate(nctx, (*args[0].values)[2]);
+	if(e1.idtype != e2.idtype || e1.idtype != ctx.codegen.types.tf32) {
+		std::string msg = "eq arguments must have same type";
+		throwError(msg, loc);
+	}
+
+	auto oid = ++ctx.codegen.id;
+	write(ctx.codegen.buf, spv::OpFOrdEqual, ctx.codegen.types.tbool,
+		oid, e1.id, e2.id);
+	return {oid, ctx.codegen.types.tbool, PrimitiveType::eBool};
+}
+
+GenExpr generateRec(const RecContext& ctx, const Location& loc,
+		const std::vector<CallArgs>& args) {
+	if(!ctx.rec) {
+		throwError("rec can only appear in rec-func", loc);
+	}
+
+	// NOTE: this is where it becomes apparent that we can't return
+	// first-class function values from a recursive function:
+	// inlining simply fails
+	if(args.size() != 1) {
+		std::string msg = "Invalid call nesting";
+		msg += " (recursive functions can't return function objects)";
+		throwError(msg, loc);
+	}
+
+	auto& cargs = *args[0].values;
+	if(cargs.size() != ctx.rec->paramTypes.size() + 1) {
+		throwError("rec: invalid number of parameters", loc);
+	}
+
+	auto& cg = ctx.codegen;
+	BackEdge edge;
+	edge.block = cg.block;
+
+	auto nctx = RecContext {ctx.codegen, *args[0].defs, ctx.rec};
+	for(auto i = 0u; i < cargs.size() - 1; ++i) {
+		// NOTE: this is where it becomes apparent that
+		// we can't pass functions (as first-class
+		// parameters) to a recursive function.
+		// Trying to generate instructions for a function
+		// will fail.
+		auto& param = cargs[i + 1];
+		auto e = generate(nctx, param);
+		if(e.id == 0) {
+			throwError("Invalid parameter expr", param.loc);
+		}
+
+		if(e.idtype != ctx.rec->paramTypes[i]) {
+			throwError("Type of argument must match initial type",
+				param.loc);
+		}
+
+		dlg_assert(e.id != 0);
+		edge.params.push_back(e.id);
+	}
+
+	ctx.rec->loops.push_back(edge);
+	write(cg.buf, spv::OpBranch, ctx.rec->cont);
+	return {0, 0, PrimitiveType::eRecCall};
 }
 
 const std::unordered_map<std::string_view, BuiltinGen> builtins = {
 	{"if", generateIf},
+	{"let", generateLet},
+	{"rec", generateRec},
 	{"output", generateOutput},
 	{"+", &generateBinop<spv::OpFAdd>},
 	{"-", generateBinop<spv::OpFSub>},
 	{"*", generateBinop<spv::OpFMul>},
 	{"/", generateBinop<spv::OpFDiv>},
 	{"vec4", generateVec4},
+	{"eq", generateEq},
 };
 
-GenExpr generateCall(Codegen& ctx, const Expression& expr,
-		const std::vector<const std::vector<Expression>*>& args,
-		const std::vector<Definition>& defs) {
+const static Defs emptyDefs = {};
+GenExpr generateCall(const RecContext& ctx, const Expression& expr,
+		const std::vector<CallArgs>& args) {
 	if(args.empty()) {
-		return generate(ctx, expr, defs);
+		return generate(ctx, expr);
 	}
 
 	auto& ev = expr.value;
-	if(ev.index() == 0 || ev.index() == 1 || ev.index() == 4) {
+	if(ev.index() == 0 || ev.index() == 1 || ev.index() == 4 || ev.index() == 5) {
 		throwError("Invalid application; no function", expr.loc);
 	}
 
@@ -234,50 +410,155 @@ GenExpr generateCall(Codegen& ctx, const Expression& expr,
 	if(ev.index() == 2) {
 		auto& list = std::get<List>(ev);
 
-		// special application case: function definition
-		if(list.values.size() > 1 &&
-				list.values[0].value.index() == 3 &&
-				std::get<Identifier>(list.values[0].value).name == "func") {
-			auto ndefs = defs;
-			auto nargs = args;
-			if(list.values.size() != 3) {
-				throwError("Invalid function definition (value count)", expr.loc);
-			}
+		auto& cg = ctx.codegen;
+		if(list.values.size() > 1 && list.values[0].value.index() == 3) {
+			auto name = std::get<Identifier>(list.values[0].value).name;
 
-			auto argsi = std::get_if<List>(&list.values[1].value);
-			if(!argsi) {
-				throwError("Invalid function definition (param)", expr.loc);
-			}
-
-			if(args.empty()) {
-				throwError("Function call without params", expr.loc);
-			}
-
-			if(argsi->values.size() + 1 != args.back()->size()) {
-				auto msg = dlg::format("Function call with invalid number "
-					"of params: Expected {}, got {}", argsi->values.size(),
-					args.back()->size());
-				throwError(msg, expr.loc);
-			}
-
-			for(auto i = 0u; i < argsi->values.size(); ++i) {
-				auto name = std::get_if<Identifier>(&argsi->values[i].value);
-				if(!name) {
-					throwError("Invalid function definition (param identifier)",
-						expr.loc);
+			// special application case: function definition
+			if(name == "func" || name == "rec-func") {
+				auto nargs = args;
+				if(list.values.size() != 3) {
+					throwError("Invalid function definition (value count)", expr.loc);
 				}
 
-				ndefs.push_back({name->name, (*args.back())[i + 1]});
-			}
+				// function arguments
+				auto pfargs = std::get_if<List>(&list.values[1].value);
+				if(!pfargs) {
+					throwError("Invalid function definition (param)", expr.loc);
+				}
 
-			nargs.pop_back();
-			auto& body = list.values[2];
-			return generateCall(ctx, body, nargs, ndefs);
+				auto& fargs = pfargs->values;
+				if(args.empty()) {
+					throwError("Function call without params", expr.loc);
+				}
+
+				// call arguments
+				auto& cargs = *args.back().values;
+				if(fargs.size() + 1 != cargs.size()) {
+					auto msg = dlg::format("Function call with invalid number "
+						"of params: Expected {}, got {}", fargs.size(),
+						args.back().values->size());
+					throwError(msg, expr.loc);
+				}
+
+				auto& body = list.values[2];
+
+				// allow (tail-)recursion
+				if(name == "rec-func") {
+					// generate blocks
+					auto hb = ++cg.id; // header block
+					auto lb = ++cg.id; // first loop block
+					auto cb = ++cg.id; // continue block
+					auto mb = ++cg.id; // merge block
+
+					// generate parameters
+					auto ndefs = ctx.defs;
+					RecData rec;
+
+					std::vector<u32> paramIDs;
+					std::vector<u32> initIDs;
+					for(auto i = 0u; i < fargs.size(); ++i) {
+						// NOTE: this is where it becomes apparent that
+						// we can't pass functions (as first-class
+						// parameters) to a recursive function.
+						// Trying to generate instructions for a function
+						// will fail.
+						auto& param = cargs[i + 1];
+
+						auto nctx = RecContext{ctx.codegen, *args.back().defs, ctx.rec};
+						auto e = generate(nctx, param);
+						if(e.id == 0) {
+							throwError("Invalid parameter expr", param.loc);
+						}
+						initIDs.push_back(e.id);
+
+						auto paramID = ++cg.id;
+						rec.paramTypes.push_back(e.idtype);
+						paramIDs.push_back(paramID);
+
+						auto name = std::get_if<Identifier>(&fargs[i].value);
+						if(!name) {
+							throwError("Invalid function definition (param identifier)",
+								expr.loc);
+						}
+
+						auto paramExpr = e;
+						paramExpr.id = paramID;
+						ndefs.insert_or_assign(name->name,
+							DefExpr{{{paramExpr}, param.loc}, &emptyDefs});
+					}
+
+					// [header block]
+					write(cg.buf, spv::OpBranch, hb);
+					write(cg.buf, spv::OpLabel, hb);
+
+					std::vector<u32> contPhis; // output ids of phis in cont block
+					for(auto i = 0u; i < fargs.size(); ++i) {
+						auto contID = ++cg.id;
+						contPhis.push_back(contID);
+						write(cg.buf, spv::OpPhi, rec.paramTypes[i], paramIDs[i],
+							initIDs[i], cg.block, contID, cb);
+					}
+
+					nargs.pop_back();
+
+					write(cg.buf, spv::OpLoopMerge, mb, cb, spv::LoopControlMaskNone);
+					write(cg.buf, spv::OpBranch, lb);
+
+					// [loop block]
+					write(cg.buf, spv::OpLabel, lb);
+
+					// insert function body
+					rec.header = hb;
+					rec.cont = cb;
+					auto nctx = RecContext {cg, ndefs, &rec};
+					cg.block = cb;
+
+					auto ret = generateCall(nctx, body, nargs);
+					write(cg.buf, spv::OpBranch, mb);
+
+					// [continue block]
+					write(cg.buf, spv::OpLabel, cb);
+					for(auto i = 0u; i < fargs.size(); ++i) {
+						std::vector<u32> phiParams;
+						for(auto& back : rec.loops) {
+							phiParams.push_back(back.params[i]);
+							phiParams.push_back(back.block);
+						}
+
+						write(cg.buf, spv::OpPhi, rec.paramTypes[i],
+							contPhis[i], phiParams);
+					}
+
+					write(cg.buf, spv::OpBranch, hb);
+
+					// [merge block]
+					write(cg.buf, spv::OpLabel, mb);
+					cg.block = mb;
+					return ret;
+				} else {
+					auto ndefs = ctx.defs;
+					for(auto i = 0u; i < fargs.size(); ++i) {
+						auto name = std::get_if<Identifier>(&fargs[i].value);
+						if(!name) {
+							throwError("Invalid function definition (param identifier)",
+								expr.loc);
+						}
+
+						ndefs.insert_or_assign(name->name,
+							DefExpr{cargs[i + 1], args.back().defs});
+					}
+
+					nargs.pop_back();
+					auto nctx = RecContext {cg, ndefs, ctx.rec};
+					return generateCall(nctx, body, nargs);
+				}
+			}
 		}
 
 		auto nargs = args;
-		nargs.push_back(&list.values);
-		return generateCall(ctx, list.values[0], nargs, defs);
+		nargs.push_back({&list.values, &ctx.defs});
+		return generateCall(ctx, list.values[0], nargs);
 	}
 
 	// identifier: must either be builtin or defined function
@@ -285,28 +566,26 @@ GenExpr generateCall(Codegen& ctx, const Expression& expr,
 		auto fname = std::get<Identifier>(ev).name;
 		auto it = builtins.find(fname);
 		if(it == builtins.end()) {
-			auto it = std::find_if(defs.begin(), defs.end(), [&](auto def){
-				return def.name == fname;
-			});
-			if(it == defs.end()) {
+			auto it = ctx.defs.find(fname);
+			if(it == ctx.defs.end()) {
 				std::string msg = "Unknown function identifier '";
 				msg += fname;
 				msg += "'";
 				throwError(msg, expr.loc);
 			}
 
-			return generateCall(ctx, it->expression, args, defs);
+			auto nctx = RecContext{ctx.codegen, *it->second.scope, ctx.rec};
+			return generateCall(nctx, it->second.expr, args);
 		} else {
-			return it->second(ctx, expr.loc, args, defs);
+			return it->second(ctx, expr.loc, args);
 		}
 	}
 
 	throwError("Invalid expression type", expr.loc);
 }
 
-
-GenExpr generate(Codegen& ctx, const Expression& expr,
-		const std::vector<Definition>& defs) {
+GenExpr generate(const RecContext& ctx, const Expression& expr) {
+	auto& cg = ctx.codegen;
 
 	// all constants have to be declared at the start of the program
 	// and we therefore backpatch them to the start later on
@@ -315,15 +594,20 @@ GenExpr generate(Codegen& ctx, const Expression& expr,
 		u32 v;
 		float f = *val;
 		std::memcpy(&v, &f, 4);
-		auto oid = ++ctx.id;
-		ctx.constants.push_back({oid, v, ctx.types.tf32});
-		return {oid, ctx.types.tf32, PrimitiveType::eFloat};
+		auto oid = ++cg.id;
+		cg.constants.push_back({oid, v, cg.types.tf32});
+		return {oid, cg.types.tf32, PrimitiveType::eFloat};
 	}
 
 	// constant bool
 	if(auto* val = std::get_if<bool>(&expr.value)) {
-		u32 id = *val ? ctx.idtrue : ctx.idfalse;
-		return {id, ctx.types.tbool, PrimitiveType::eBool};
+		u32 id = *val ? cg.idtrue : cg.idfalse;
+		return {id, cg.types.tbool, PrimitiveType::eBool};
+	}
+
+	// previously generated expression
+	if(auto* val = std::get_if<GenExpr>(&expr.value)) {
+		return *val;
 	}
 
 	// TODO: constant string
@@ -334,23 +618,26 @@ GenExpr generate(Codegen& ctx, const Expression& expr,
 	// identifier
 	if(expr.value.index() == 3) {
 		auto& identifier = std::get<3>(expr.value);
-		auto it = std::find_if(defs.begin(), defs.end(), [&](auto def){
-			return def.name == identifier.name;
-		});
-
-		if(it == defs.end()) {
+		auto it = ctx.defs.find(identifier.name);
+		if(it == ctx.defs.end()) {
 			std::string msg = "Unknown identifier '";
 			msg += identifier.name;
 			msg += "'";
 			throwError(msg, expr.loc);
 		}
 
-		return generate(ctx, it->expression, defs);
+		auto nctx = RecContext{ctx.codegen, *it->second.scope, ctx.rec};
+		return generate(nctx, it->second.expr);
 	}
 
 	// application
 	auto& app = std::get<2>(expr.value);
-	return generateCall(ctx, app.values[0], {&app.values}, defs);
+	return generateCall(ctx, app.values[0], {{&app.values, &ctx.defs}});
+}
+
+GenExpr generateExpr(const Context& ctx, const Expression& expr) {
+	RecContext rctx{ctx.codegen, ctx.defs, nullptr};
+	return generate(rctx, expr);
 }
 
 void init(Codegen& ctx) {
@@ -369,7 +656,10 @@ void init(Codegen& ctx) {
 	// entry point function
 	write(ctx.buf, spv::OpFunction, ctx.types.tvoid, ctx.idmain,
 		spv::FunctionControlMaskNone, ctx.idmaintype);
-	write(ctx.buf, spv::OpLabel, ++ctx.id);
+
+	ctx.entryblock = ++ctx.id;
+	ctx.block = ctx.entryblock;
+	write(ctx.buf, spv::OpLabel, ctx.entryblock);
 }
 
 std::vector<u32> finish(Codegen& ctx) {

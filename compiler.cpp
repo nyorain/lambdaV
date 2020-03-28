@@ -11,9 +11,24 @@
 #include <deque>
 
 void skipws(std::string_view& source, Location& loc) {
-	while(std::isspace(source[0])) {
-		if(source[0] == '\n') {
+	while(!source.empty() && (std::isspace(source[0]) || source[0] == '#')) {
+		if(source[0] == '#') { // comment
+			auto n = source.find('\n');
+			if(n == source.npos) {
+				// empty the string
+				auto rem = source.length();
+				source = source.substr(rem);
+				loc.col += rem;
+				return;
+			}
+
 			++loc.row;
+			loc.col = 0;
+			source = source.substr(n + 1);
+			continue;
+		} else if(source[0] == '\n') {
+			++loc.row;
+			loc.col = 0;
 		} else {
 			++loc.col;
 		}
@@ -90,7 +105,7 @@ Expression parseExpression(std::string_view& view, Location& loc) {
 	}
 
 	// otherwise it's an identifier
-	auto term = view.find_first_of("\n\t\r\v\f )");
+	auto term = view.find_first_of("\n\t\r\v\f ()");
 	if(term == view.npos) {
 		throwError("Invalid expression", oloc);
 	}
@@ -140,21 +155,37 @@ void writeFile(std::string_view filename, const std::vector<u32>& buffer) {
 	ofs.write(data, buffer.size() * 4);
 }
 
-const std::string source = R"SRC(
-	(define plusc (func (x) (func (y) (+ x y))))
-	(define plus (func (x y) ((plusc x) y)))
-	(define plus2 (func (x) (plus x 2)))
 
-	(define white (vec4 (if true (plus2 -1) 0) 1.0 0.4 1.0))
+const std::string source = R"SRC(
+	(define nat-fold (func (n accum func) (
+		let ((body (rec-func (n accum) (
+				if (eq n 0)
+					accum
+					(rec (- n 1) (func accum n))
+			))))
+			(body n accum)
+	)))
+
+	# (define plus2 (func (x) (plus x 2)))
+	# (define plusc (func (x) (func (y) (+ x y))))
+	# (define plus (func (x y) ((plusc x) y)))
+
+	(define sumup-accum (func (accum n) (+ accum n)))
+	# sums up all natural numbers up to x
+	(define sumup (func (x) (nat-fold x 0 sumup-accum)))
+
+	(define val (sumup 7))
+	(define white (vec4 val 1.0 0.4 1.0))
 	(output 0 white)
 )SRC";
 
 int main() {
 	std::string_view sourcev = source;
-	std::vector<Definition> defs;
 
 	Location loc;
 	Codegen codegen;
+	Defs defs;
+	Context ctx {codegen, defs};
 	init(codegen);
 
 	while(!sourcev.empty()) {
@@ -172,11 +203,11 @@ int main() {
 			// TODO: check name for keywords/builtins?
 			auto name = std::get<3>(list->values[1].value).name;
 			std::cout << "define: " << name << " " << dump(list->values[2]) << "\n";
-			defs.push_back({name, list->values[2]});
+			defs.insert_or_assign(name, DefExpr{list->values[2], &defs});
 		} else {
 			// make sure it's an instruction, i.e. top-level expression,
 			// i.e. has type void
-			auto ret = generate(codegen, expr, defs);
+			auto ret = generateExpr(ctx, expr);
 			if(ret.type.index() != 0 ||
 					std::get<0>(ret.type) != PrimitiveType::eVoid) {
 				throwError("Expression wasn't toplevel", expr.loc);
