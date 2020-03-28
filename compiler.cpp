@@ -11,8 +11,8 @@
 #include <deque>
 
 void skipws(std::string_view& source, Location& loc) {
-	while(!source.empty() && (std::isspace(source[0]) || source[0] == '#')) {
-		if(source[0] == '#') { // comment
+	while(!source.empty() && (std::isspace(source[0]) || source[0] == ';')) {
+		if(source[0] == ';') { // comment
 			auto n = source.find('\n');
 			if(n == source.npos) {
 				// empty the string
@@ -155,31 +155,41 @@ void writeFile(std::string_view filename, const std::vector<u32>& buffer) {
 	ofs.write(data, buffer.size() * 4);
 }
 
+void printHelp() {
+	std::cout << "Usage: lambdav <source>\n";
+	std::cout << "\tWill produce output.spv\n";
+}
 
-const std::string source = R"SRC(
-	(define nat-fold (func (n accum func) (
-		let ((body (rec-func (n accum) (
-				if (eq n 0)
-					accum
-					(rec (- n 1) (func accum n))
-			))))
-			(body n accum)
-	)))
+std::string readFile(std::string_view filename) {
+	auto openmode = std::ios::ate;
+	std::ifstream ifs(std::string{filename}, openmode);
+	ifs.exceptions(std::ostream::failbit | std::ostream::badbit);
 
-	# (define plus2 (func (x) (plus x 2)))
-	# (define plusc (func (x) (func (y) (+ x y))))
-	# (define plus (func (x y) ((plusc x) y)))
+	auto size = ifs.tellg();
+	ifs.seekg(0, std::ios::beg);
 
-	(define sumup-accum (func (accum n) (+ accum n)))
-	# sums up all natural numbers up to x
-	(define sumup (func (x) (nat-fold x 0 sumup-accum)))
+	std::string buffer;
+	buffer.resize(size);
+	ifs.read(buffer.data(), size);
+	return buffer;
+}
 
-	(define val (sumup 7))
-	(define white (vec4 val 1.0 0.4 1.0))
-	(output 0 white)
-)SRC";
+int main(int argc, const char** argv) {
+	if(argc < 2 || !std::strcmp(argv[1], "-h") ||
+			!std::strcmp(argv[1], "--help")) {
+		printHelp();
+		return -1;
+	}
 
-int main() {
+	auto input = argv[1];
+	std::string source;
+	try {
+		source = readFile(input);
+	} catch(const std::exception& err) {
+		std::cout << "Can't read input: " << err.what() << "\n";
+		return -2;
+	}
+
 	std::string_view sourcev = source;
 
 	Location loc;
@@ -192,7 +202,7 @@ int main() {
 		auto expr = parseExpression(sourcev, loc);
 
 		if(auto list = std::get_if<List>(&expr.value);
-				!list->values.empty() &&
+				list && !list->values.empty() &&
 				list->values[0].value.index() == 3 &&
 				std::get<Identifier>(list->values[0].value).name == "define") {
 
