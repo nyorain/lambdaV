@@ -1,5 +1,6 @@
 #pragma once
 
+#include "parser.hpp"
 #include <cstdint>
 #include <variant>
 #include <string_view>
@@ -14,6 +15,12 @@ struct Expression;
 struct DefExpr;
 
 using Defs = std::unordered_map<std::string_view, DefExpr>;
+
+template<typename ...Ts>
+struct Visitor : Ts...  {
+    Visitor(const Ts&... args) : Ts(args)...  {}
+    using Ts::operator()...;
+};
 
 enum class PrimitiveType {
 	eVoid,
@@ -39,27 +46,17 @@ struct GenExpr {
 	Type type;
 };
 
-// AST
-struct Location {
-	unsigned row {0};
-	unsigned col {0};
-};
-
-struct List {
-	std::vector<Expression> values;
-};
-
-struct Identifier {
-	std::string_view name;
-};
-
-struct Expression {
-	std::variant<double, std::string_view, List, Identifier, bool, GenExpr> value;
+// Expression for codegen:
+// either a standard expression or a GenExpr
+struct CExpression {
+	std::variant<bool, double, std::string_view, List, Identifier, GenExpr> value;
 	Location loc;
 };
 
+CExpression wrap(const Expression& expr);
+
 struct DefExpr {
-	Expression expr;
+	CExpression expr;
 	const Defs* scope;
 };
 

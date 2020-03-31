@@ -88,14 +88,14 @@ struct RecContext : public Context {
 };
 
 struct CallArgs {
-	const std::vector<Expression>* values;
+	const std::vector<CExpression>* values;
 	const Defs* defs;
 };
 
 // Recursive generation
-GenExpr generateCall(const RecContext& ctx, const Expression& expr,
+GenExpr generateCall(const RecContext& ctx, const CExpression& expr,
 		const std::vector<CallArgs>& args);
-GenExpr generate(const RecContext& ctx, const Expression& expr);
+GenExpr generate(const RecContext& ctx, const CExpression& expr);
 
 using BuiltinGen = GenExpr(*)(const RecContext& ctx, const Location& loc,
 		const std::vector<CallArgs>& args);
@@ -293,7 +293,8 @@ GenExpr generateLet(const RecContext& ctx, const Location& loc,
 				list->values[0].loc);
 		}
 
-		ndefs.insert_or_assign(identifier->name, DefExpr{list->values[1], &ctx.defs});
+		auto de = DefExpr{wrap(list->values[1]), &ctx.defs};
+		ndefs.insert_or_assign(identifier->name, de);
 	}
 
 	auto nctx = RecContext{ctx.codegen, ndefs, ctx.rec};
@@ -395,7 +396,7 @@ const std::unordered_map<std::string_view, BuiltinGen> builtins = {
 };
 
 const static Defs emptyDefs = {};
-GenExpr generateCall(const RecContext& ctx, const Expression& expr,
+GenExpr generateCall(const RecContext& ctx, const CExpression& expr,
 		const std::vector<CallArgs>& args) {
 	if(args.empty()) {
 		return generate(ctx, expr);
@@ -514,7 +515,7 @@ GenExpr generateCall(const RecContext& ctx, const Expression& expr,
 					auto nctx = RecContext {cg, ndefs, &rec};
 					cg.block = cb;
 
-					auto ret = generateCall(nctx, body, nargs);
+					auto ret = generateCall(nctx, wrap(body), nargs);
 					write(cg.buf, spv::OpBranch, mb);
 
 					// [continue block]
@@ -551,14 +552,19 @@ GenExpr generateCall(const RecContext& ctx, const Expression& expr,
 
 					nargs.pop_back();
 					auto nctx = RecContext {cg, ndefs, ctx.rec};
-					return generateCall(nctx, body, nargs);
+					return generateCall(nctx, wrap(body), nargs);
 				}
 			}
 		}
 
 		auto nargs = args;
-		nargs.push_back({&list.values, &ctx.defs});
-		return generateCall(ctx, list.values[0], nargs);
+		std::vector<CExpression> args;
+		for(auto& val : list.values) {
+			args.push_back(wrap(val));
+		}
+
+		nargs.push_back({&args, &ctx.defs});
+		return generateCall(ctx, args[0], nargs);
 	}
 
 	// identifier: must either be builtin or defined function
@@ -584,60 +590,58 @@ GenExpr generateCall(const RecContext& ctx, const Expression& expr,
 	throwError("Invalid expression type", expr.loc);
 }
 
-GenExpr generate(const RecContext& ctx, const Expression& expr) {
+GenExpr generate(const RecContext& ctx, const CExpression& expr) {
 	auto& cg = ctx.codegen;
 
-	// all constants have to be declared at the start of the program
-	// and we therefore backpatch them to the start later on
-	// constant number
-	if(auto* val = std::get_if<double>(&expr.value)) {
-		u32 v;
-		float f = *val;
-		std::memcpy(&v, &f, 4);
-		auto oid = ++cg.id;
-		cg.constants.push_back({oid, v, cg.types.tf32});
-		return {oid, cg.types.tf32, PrimitiveType::eFloat};
-	}
+	return std::visit(Visitor{
+		[&](double val) {
+			// all constants have to be declared at the start of the program
+			// and we therefore backpatch them to the start later on
+			// constant number
+			u32 v;
+			float f = val;
+			std::memcpy(&v, &f, 4);
+			auto oid = ++cg.id;
+			cg.constants.push_back({oid, v, cg.types.tf32});
+			return GenExpr{oid, cg.types.tf32, PrimitiveType::eFloat};
+		},
+		[&](bool val) {
+			u32 id = val ? cg.idtrue : cg.idfalse;
+			return GenExpr{id, cg.types.tbool, PrimitiveType::eBool};
+		},
+		[&](const Identifier& id) {
+			auto it = ctx.defs.find(id.name);
+			if(it == ctx.defs.end()) {
+				std::string msg = "Unknown identifier '";
+				msg += id.name;
+				msg += "'";
+				throwError(msg, expr.loc);
+			}
 
-	// constant bool
-	if(auto* val = std::get_if<bool>(&expr.value)) {
-		u32 id = *val ? cg.idtrue : cg.idfalse;
-		return {id, cg.types.tbool, PrimitiveType::eBool};
-	}
+			auto nctx = RecContext{ctx.codegen, *it->second.scope, ctx.rec};
+			return generate(nctx, it->second.expr);
+		},
+		[&](const GenExpr& ge) {
+			return ge;
+		},
+		[&](std::string_view) {
+			throwError("Can't generate string", expr.loc);
+			return GenExpr {};
+		},
+		[&](const List& list) {
+			std::vector<CExpression> args;
+			for(auto& val : list.values) {
+				args.push_back(wrap(val));
+			}
 
-	// previously generated expression
-	if(auto* val = std::get_if<GenExpr>(&expr.value)) {
-		return *val;
-	}
-
-	// TODO: constant string
-	if(expr.value.index() == 1) {
-		throwError("Can't generate string", expr.loc);
-	}
-
-	// identifier
-	if(expr.value.index() == 3) {
-		auto& identifier = std::get<3>(expr.value);
-		auto it = ctx.defs.find(identifier.name);
-		if(it == ctx.defs.end()) {
-			std::string msg = "Unknown identifier '";
-			msg += identifier.name;
-			msg += "'";
-			throwError(msg, expr.loc);
+			return generateCall(ctx, args[0], {{&args, &ctx.defs}});
 		}
-
-		auto nctx = RecContext{ctx.codegen, *it->second.scope, ctx.rec};
-		return generate(nctx, it->second.expr);
-	}
-
-	// application
-	auto& app = std::get<2>(expr.value);
-	return generateCall(ctx, app.values[0], {{&app.values, &ctx.defs}});
+	}, expr.value);
 }
 
 GenExpr generateExpr(const Context& ctx, const Expression& expr) {
 	RecContext rctx{ctx.codegen, ctx.defs, nullptr};
-	return generate(rctx, expr);
+	return generate(rctx, wrap(expr));
 }
 
 void init(Codegen& ctx) {

@@ -15,6 +15,11 @@
 ; sums up all natural numbers up to x
 (define sumup (func (x) (nat-fold x 0 sumup-accum)))
 
-(define val (sumup 7))
+(define twice (func (f) (func (x) (f (f x)))))
+(define add1 (func (x) (+ x 1)))
+(define add2 (twice add1))
+
+(define val (add2 (sumup 7)))
 (define white (vec4 val 1.0 0.4 1.0))
 (output 0 white)
+
