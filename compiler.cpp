@@ -93,6 +93,7 @@ int main(int argc, const char** argv) {
 	Defs defs;
 	Context ctx {codegen, defs};
 	init(codegen);
+	skipws(parser);
 
 	while(!parser.source.empty()) {
 		auto expr = nextExpression(parser);

@@ -248,16 +248,16 @@ GenExpr generateOutput(const RecContext& ctx, const Location& loc,
 	}
 
 	auto& a1 = (*args[0].values)[1];
-	if(a1.value.index() != 0) {
+	auto oloc = std::get_if<double>(&a1.value);
+	if(!oloc) {
 		throwError("First argument of output must be int", a1.loc);
 	}
 
 	auto nctx = RecContext {ctx.codegen, *args.back().defs, ctx.rec};
 	auto e1 = generate(nctx, (*args[0].values)[2]);
 
-	unsigned output = std::get<0>(a1.value);
 	auto oid = ++ctx.codegen.id;
-	ctx.codegen.outputs.push_back({oid, output, e1.idtype});
+	ctx.codegen.outputs.push_back({oid, u32(*oloc), e1.idtype});
 
 	write(ctx.codegen.buf, spv::OpStore, oid, e1.id);
 	return {0, 0, PrimitiveType::eVoid};
@@ -396,198 +396,199 @@ const std::unordered_map<std::string_view, BuiltinGen> builtins = {
 };
 
 const static Defs emptyDefs = {};
+GenExpr generateCall(const RecContext& ctx, const List& list,
+		const Location& loc, const std::vector<CallArgs>& args) {
+	auto& cg = ctx.codegen;
+	if(list.values.size() > 1 &&
+			std::holds_alternative<Identifier>(list.values[0].value)) {
+		auto name = std::get<Identifier>(list.values[0].value).name;
+
+		// special application case: function definition
+		if(name == "func" || name == "rec-func") {
+			auto nargs = args;
+			if(list.values.size() != 3) {
+				throwError("Invalid function definition (value count)", loc);
+			}
+
+			// function arguments
+			auto pfargs = std::get_if<List>(&list.values[1].value);
+			if(!pfargs) {
+				throwError("Invalid function definition (param)", loc);
+			}
+
+			auto& fargs = pfargs->values;
+			if(args.empty()) {
+				throwError("Function call without params", loc);
+			}
+
+			// call arguments
+			auto& cargs = *args.back().values;
+			if(fargs.size() + 1 != cargs.size()) {
+				auto msg = dlg::format("Function call with invalid number "
+					"of params: Expected {}, got {}", fargs.size(),
+					args.back().values->size());
+				throwError(msg, loc);
+			}
+
+			auto& body = list.values[2];
+
+			// allow (tail-)recursion
+			if(name == "rec-func") {
+				// generate blocks
+				auto hb = ++cg.id; // header block
+				auto lb = ++cg.id; // first loop block
+				auto cb = ++cg.id; // continue block
+				auto mb = ++cg.id; // merge block
+
+				// generate parameters
+				auto ndefs = ctx.defs;
+				RecData rec;
+
+				std::vector<u32> paramIDs;
+				std::vector<u32> initIDs;
+				for(auto i = 0u; i < fargs.size(); ++i) {
+					// NOTE: this is where it becomes apparent that
+					// we can't pass functions (as first-class
+					// parameters) to a recursive function.
+					// Trying to generate instructions for a function
+					// will fail.
+					auto& param = cargs[i + 1];
+
+					auto nctx = RecContext{ctx.codegen, *args.back().defs, ctx.rec};
+					auto e = generate(nctx, param);
+					if(e.id == 0) {
+						throwError("Invalid parameter expr", param.loc);
+					}
+					initIDs.push_back(e.id);
+
+					auto paramID = ++cg.id;
+					rec.paramTypes.push_back(e.idtype);
+					paramIDs.push_back(paramID);
+
+					auto name = std::get_if<Identifier>(&fargs[i].value);
+					if(!name) {
+						throwError("Invalid function definition (param identifier)",
+							loc);
+					}
+
+					auto paramExpr = e;
+					paramExpr.id = paramID;
+					ndefs.insert_or_assign(name->name,
+						DefExpr{{{paramExpr}, param.loc}, &emptyDefs});
+				}
+
+				// [header block]
+				write(cg.buf, spv::OpBranch, hb);
+				write(cg.buf, spv::OpLabel, hb);
+
+				std::vector<u32> contPhis; // output ids of phis in cont block
+				for(auto i = 0u; i < fargs.size(); ++i) {
+					auto contID = ++cg.id;
+					contPhis.push_back(contID);
+					write(cg.buf, spv::OpPhi, rec.paramTypes[i], paramIDs[i],
+						initIDs[i], cg.block, contID, cb);
+				}
+
+				nargs.pop_back();
+
+				write(cg.buf, spv::OpLoopMerge, mb, cb, spv::LoopControlMaskNone);
+				write(cg.buf, spv::OpBranch, lb);
+
+				// [loop block]
+				write(cg.buf, spv::OpLabel, lb);
+
+				// insert function body
+				rec.header = hb;
+				rec.cont = cb;
+				auto nctx = RecContext {cg, ndefs, &rec};
+				cg.block = cb;
+
+				auto ret = generateCall(nctx, wrap(body), nargs);
+				write(cg.buf, spv::OpBranch, mb);
+
+				// [continue block]
+				write(cg.buf, spv::OpLabel, cb);
+				for(auto i = 0u; i < fargs.size(); ++i) {
+					std::vector<u32> phiParams;
+					for(auto& back : rec.loops) {
+						phiParams.push_back(back.params[i]);
+						phiParams.push_back(back.block);
+					}
+
+					write(cg.buf, spv::OpPhi, rec.paramTypes[i],
+						contPhis[i], phiParams);
+				}
+
+				write(cg.buf, spv::OpBranch, hb);
+
+				// [merge block]
+				write(cg.buf, spv::OpLabel, mb);
+				cg.block = mb;
+				return ret;
+			} else {
+				auto ndefs = ctx.defs;
+				for(auto i = 0u; i < fargs.size(); ++i) {
+					auto name = std::get_if<Identifier>(&fargs[i].value);
+					if(!name) {
+						throwError("Invalid function definition (param identifier)",
+							loc);
+					}
+
+					ndefs.insert_or_assign(name->name,
+						DefExpr{cargs[i + 1], args.back().defs});
+				}
+
+				nargs.pop_back();
+				auto nctx = RecContext {cg, ndefs, ctx.rec};
+				return generateCall(nctx, wrap(body), nargs);
+			}
+		}
+	}
+
+	auto nargs = args;
+	std::vector<CExpression> cargs;
+	for(auto& val : list.values) {
+		cargs.push_back(wrap(val));
+	}
+
+	nargs.push_back({&cargs, &ctx.defs});
+	return generateCall(ctx, cargs[0], nargs);
+}
+
+GenExpr generateCall(const RecContext& ctx, const Identifier& identifier,
+		const Location& loc, const std::vector<CallArgs>& args) {
+	auto fname = identifier.name;
+	auto it = builtins.find(fname);
+	if(it == builtins.end()) {
+		auto it = ctx.defs.find(fname);
+		if(it == ctx.defs.end()) {
+			std::string msg = "Unknown function identifier '";
+			msg += fname;
+			msg += "'";
+			throwError(msg, loc);
+		}
+
+		auto nctx = RecContext{ctx.codegen, *it->second.scope, ctx.rec};
+		return generateCall(nctx, it->second.expr, args);
+	} else {
+		return it->second(ctx, loc, args);
+	}
+}
+
 GenExpr generateCall(const RecContext& ctx, const CExpression& expr,
 		const std::vector<CallArgs>& args) {
 	if(args.empty()) {
 		return generate(ctx, expr);
 	}
 
-	auto& ev = expr.value;
-	if(ev.index() == 0 || ev.index() == 1 || ev.index() == 4 || ev.index() == 5) {
-		throwError("Invalid application; no function", expr.loc);
-	}
-
-	// application
-	if(ev.index() == 2) {
-		auto& list = std::get<List>(ev);
-
-		auto& cg = ctx.codegen;
-		if(list.values.size() > 1 && list.values[0].value.index() == 3) {
-			auto name = std::get<Identifier>(list.values[0].value).name;
-
-			// special application case: function definition
-			if(name == "func" || name == "rec-func") {
-				auto nargs = args;
-				if(list.values.size() != 3) {
-					throwError("Invalid function definition (value count)", expr.loc);
-				}
-
-				// function arguments
-				auto pfargs = std::get_if<List>(&list.values[1].value);
-				if(!pfargs) {
-					throwError("Invalid function definition (param)", expr.loc);
-				}
-
-				auto& fargs = pfargs->values;
-				if(args.empty()) {
-					throwError("Function call without params", expr.loc);
-				}
-
-				// call arguments
-				auto& cargs = *args.back().values;
-				if(fargs.size() + 1 != cargs.size()) {
-					auto msg = dlg::format("Function call with invalid number "
-						"of params: Expected {}, got {}", fargs.size(),
-						args.back().values->size());
-					throwError(msg, expr.loc);
-				}
-
-				auto& body = list.values[2];
-
-				// allow (tail-)recursion
-				if(name == "rec-func") {
-					// generate blocks
-					auto hb = ++cg.id; // header block
-					auto lb = ++cg.id; // first loop block
-					auto cb = ++cg.id; // continue block
-					auto mb = ++cg.id; // merge block
-
-					// generate parameters
-					auto ndefs = ctx.defs;
-					RecData rec;
-
-					std::vector<u32> paramIDs;
-					std::vector<u32> initIDs;
-					for(auto i = 0u; i < fargs.size(); ++i) {
-						// NOTE: this is where it becomes apparent that
-						// we can't pass functions (as first-class
-						// parameters) to a recursive function.
-						// Trying to generate instructions for a function
-						// will fail.
-						auto& param = cargs[i + 1];
-
-						auto nctx = RecContext{ctx.codegen, *args.back().defs, ctx.rec};
-						auto e = generate(nctx, param);
-						if(e.id == 0) {
-							throwError("Invalid parameter expr", param.loc);
-						}
-						initIDs.push_back(e.id);
-
-						auto paramID = ++cg.id;
-						rec.paramTypes.push_back(e.idtype);
-						paramIDs.push_back(paramID);
-
-						auto name = std::get_if<Identifier>(&fargs[i].value);
-						if(!name) {
-							throwError("Invalid function definition (param identifier)",
-								expr.loc);
-						}
-
-						auto paramExpr = e;
-						paramExpr.id = paramID;
-						ndefs.insert_or_assign(name->name,
-							DefExpr{{{paramExpr}, param.loc}, &emptyDefs});
-					}
-
-					// [header block]
-					write(cg.buf, spv::OpBranch, hb);
-					write(cg.buf, spv::OpLabel, hb);
-
-					std::vector<u32> contPhis; // output ids of phis in cont block
-					for(auto i = 0u; i < fargs.size(); ++i) {
-						auto contID = ++cg.id;
-						contPhis.push_back(contID);
-						write(cg.buf, spv::OpPhi, rec.paramTypes[i], paramIDs[i],
-							initIDs[i], cg.block, contID, cb);
-					}
-
-					nargs.pop_back();
-
-					write(cg.buf, spv::OpLoopMerge, mb, cb, spv::LoopControlMaskNone);
-					write(cg.buf, spv::OpBranch, lb);
-
-					// [loop block]
-					write(cg.buf, spv::OpLabel, lb);
-
-					// insert function body
-					rec.header = hb;
-					rec.cont = cb;
-					auto nctx = RecContext {cg, ndefs, &rec};
-					cg.block = cb;
-
-					auto ret = generateCall(nctx, wrap(body), nargs);
-					write(cg.buf, spv::OpBranch, mb);
-
-					// [continue block]
-					write(cg.buf, spv::OpLabel, cb);
-					for(auto i = 0u; i < fargs.size(); ++i) {
-						std::vector<u32> phiParams;
-						for(auto& back : rec.loops) {
-							phiParams.push_back(back.params[i]);
-							phiParams.push_back(back.block);
-						}
-
-						write(cg.buf, spv::OpPhi, rec.paramTypes[i],
-							contPhis[i], phiParams);
-					}
-
-					write(cg.buf, spv::OpBranch, hb);
-
-					// [merge block]
-					write(cg.buf, spv::OpLabel, mb);
-					cg.block = mb;
-					return ret;
-				} else {
-					auto ndefs = ctx.defs;
-					for(auto i = 0u; i < fargs.size(); ++i) {
-						auto name = std::get_if<Identifier>(&fargs[i].value);
-						if(!name) {
-							throwError("Invalid function definition (param identifier)",
-								expr.loc);
-						}
-
-						ndefs.insert_or_assign(name->name,
-							DefExpr{cargs[i + 1], args.back().defs});
-					}
-
-					nargs.pop_back();
-					auto nctx = RecContext {cg, ndefs, ctx.rec};
-					return generateCall(nctx, wrap(body), nargs);
-				}
-			}
-		}
-
-		auto nargs = args;
-		std::vector<CExpression> args;
-		for(auto& val : list.values) {
-			args.push_back(wrap(val));
-		}
-
-		nargs.push_back({&args, &ctx.defs});
-		return generateCall(ctx, args[0], nargs);
-	}
-
-	// identifier: must either be builtin or defined function
-	if(ev.index() == 3) {
-		auto fname = std::get<Identifier>(ev).name;
-		auto it = builtins.find(fname);
-		if(it == builtins.end()) {
-			auto it = ctx.defs.find(fname);
-			if(it == ctx.defs.end()) {
-				std::string msg = "Unknown function identifier '";
-				msg += fname;
-				msg += "'";
-				throwError(msg, expr.loc);
-			}
-
-			auto nctx = RecContext{ctx.codegen, *it->second.scope, ctx.rec};
-			return generateCall(nctx, it->second.expr, args);
-		} else {
-			return it->second(ctx, expr.loc, args);
-		}
-	}
-
-	throwError("Invalid expression type", expr.loc);
+	return std::visit(Visitor{
+		[&](const List& list) { return generateCall(ctx, list, expr.loc, args); },
+		[&](const Identifier& id) { return generateCall(ctx, id, expr.loc, args); },
+		[&](const auto&) {
+			throwError("Invalid application; no function", expr.loc);
+			return GenExpr {};
+		},
+	}, expr.value);
 }
 
 GenExpr generate(const RecContext& ctx, const CExpression& expr) {
