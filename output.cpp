@@ -1,5 +1,6 @@
 #include "spirv.hpp"
 #include "fwd.hpp"
+#include "GLSL.std.450.h"
 #include <dlg/dlg.hpp>
 
 #include <vector>
@@ -222,16 +223,32 @@ GenExpr generateVec4(const RecContext& ctx, const Location& loc,
 	auto nctx = RecContext {ctx.codegen, *args.back().defs, ctx.rec};
 
 	std::vector<u32> ids;
-	auto e1 = generate(nctx, (*args[0].values)[1]);
-	auto e2 = generate(nctx, (*args[0].values)[2]);
-	auto e3 = generate(nctx, (*args[0].values)[3]);
-	auto e4 = generate(nctx, (*args[0].values)[4]);
+	unsigned comps = 0u;
+	for(auto i = 1u; i < args[0].values->size(); ++i) {
+		auto e1 = generate(nctx, (*args[0].values)[i]);
+		ids.push_back(e1.id);
 
-	// TODO: check that all types are floats
+		if(auto pt = std::get_if<PrimitiveType>(&e1.type);
+				pt && *pt == PrimitiveType::eFloat) {
+			++comps;
+		} else if(auto vt = std::get_if<VectorType>(&e1.type);
+				vt && vt->primitive == PrimitiveType::eFloat) {
+			comps += vt->count;
+		} else {
+			throwError("Unexpected type", (*args[0].values)[i].loc);
+		}
+	}
+
+	if(comps != 4) {
+		std::string msg = "Unexpected number of components for vec constructor. ";
+		msg += "Expected 4, got ";
+		msg += std::to_string(comps);
+		throwError(msg, loc);
+	}
 
 	auto oid = ++ctx.codegen.id;
-	write(ctx.codegen.buf, spv::OpCompositeConstruct, ctx.codegen.types.tvec4,
-		oid, e1.id, e2.id, e3.id, e4.id);
+	write(ctx.codegen.buf, spv::OpCompositeConstruct,
+		ctx.codegen.types.tvec4, ids);
 
 	auto type = VectorType{4, PrimitiveType::eFloat};
 	return {oid, ctx.codegen.types.tvec4, type};
@@ -382,17 +399,112 @@ GenExpr generateRec(const RecContext& ctx, const Location& loc,
 	return {0, 0, PrimitiveType::eRecCall};
 }
 
+template<spv::Op Op>
+GenExpr generateLogicalBin(const RecContext& ctx, const Location& loc,
+		const std::vector<CallArgs>& args) {
+	if(args.size() != 1) {
+		throwError("Invalid call nesting", loc);
+	}
+
+	if(args[0].values->size() < 3) {
+		std::string msg = "Function expects at least 2 argument";
+		throwError(msg, loc);
+	}
+
+	// TODO: also allow boolean vectors
+	auto nctx = RecContext {ctx.codegen, *args[0].defs, ctx.rec};
+	auto e1 = generate(nctx, (*args[0].values)[1]);
+	if(e1.idtype != ctx.codegen.types.tbool) {
+		throwError("Argument must be of type bool", loc);
+	}
+
+	for(auto i = 2u; i < args[0].values->size(); ++i) {
+		auto e2 = generate(nctx, (*args[0].values)[i]);
+		if(e2.idtype != ctx.codegen.types.tbool) {
+			throwError("Argument must be of type bool", loc);
+		}
+
+		auto oid = ++ctx.codegen.id;
+		write(ctx.codegen.buf, Op, ctx.codegen.types.tbool,
+			oid, e1.id, e2.id);
+		e1.id = oid;
+	}
+
+	return e1;
+}
+
+template<unsigned Instr>
+GenExpr generateGlslUnary(const RecContext& ctx, const Location& loc,
+		const std::vector<CallArgs>& args) {
+	if(args.size() != 1) {
+		throwError("Invalid call nesting", loc);
+	}
+
+	if(args[0].values->size() != 2) {
+		std::string msg = "Function expects 1 argument";
+		throwError(msg, loc);
+	}
+
+	auto nctx = RecContext {ctx.codegen, *args.back().defs, ctx.rec};
+	auto e1 = generate(nctx, (*args[0].values)[1]);
+	// TODO: check for type
+
+	auto oid = ++ctx.codegen.id;
+	write(ctx.codegen.buf, spv::OpExtInst, e1.idtype, oid,
+		ctx.codegen.idglsl, Instr, e1.id);
+	return {oid, ctx.codegen.types.tbool, PrimitiveType::eBool};
+}
+
 const std::unordered_map<std::string_view, BuiltinGen> builtins = {
+	// core: control-flow/bindings
 	{"if", generateIf},
 	{"let", generateLet},
 	{"rec", generateRec},
+
+	// top-level instructions
 	{"output", generateOutput},
+
+	// core math
 	{"+", &generateBinop<spv::OpFAdd>},
 	{"-", generateBinop<spv::OpFSub>},
 	{"*", generateBinop<spv::OpFMul>},
 	{"/", generateBinop<spv::OpFDiv>},
-	{"vec4", generateVec4},
+
+	// logic
 	{"eq", generateEq},
+	{"and", generateLogicalBin<spv::OpLogicalAnd>},
+	{"or", generateLogicalBin<spv::OpLogicalOr>},
+
+	// types
+	{"vec4", generateVec4},
+
+	{"fract", generateGlslUnary<GLSLstd450Fract>},
+	{"ceil", generateGlslUnary<GLSLstd450Ceil>},
+	{"sign", generateGlslUnary<GLSLstd450FSign>},
+	{"abs", generateGlslUnary<GLSLstd450FAbs>},
+	{"trunc", generateGlslUnary<GLSLstd450Trunc>},
+	{"round-even", generateGlslUnary<GLSLstd450RoundEven>},
+	{"round", generateGlslUnary<GLSLstd450Round>},
+	{"radians", generateGlslUnary<GLSLstd450Radians>},
+	{"degrees", generateGlslUnary<GLSLstd450Degrees>},
+	{"sin", generateGlslUnary<GLSLstd450Sin>},
+	{"cos", generateGlslUnary<GLSLstd450Cos>},
+	{"tan", generateGlslUnary<GLSLstd450Tan>},
+	{"asin", generateGlslUnary<GLSLstd450Asin>},
+	{"acos", generateGlslUnary<GLSLstd450Acos>},
+	{"atan", generateGlslUnary<GLSLstd450Atan>},
+	{"sinh", generateGlslUnary<GLSLstd450Sinh>},
+	{"cosh", generateGlslUnary<GLSLstd450Cosh>},
+	{"tanh", generateGlslUnary<GLSLstd450Tanh>},
+	{"asinh", generateGlslUnary<GLSLstd450Asinh>},
+	{"acosh", generateGlslUnary<GLSLstd450Acosh>},
+	{"atanh", generateGlslUnary<GLSLstd450Atanh>},
+	{"exp", generateGlslUnary<GLSLstd450Exp>},
+	{"exp2", generateGlslUnary<GLSLstd450Exp2>},
+	{"log", generateGlslUnary<GLSLstd450Log>},
+	{"log2", generateGlslUnary<GLSLstd450Log2>},
+	{"sqrt", generateGlslUnary<GLSLstd450Sqrt>},
+	{"inverse-sqrt", generateGlslUnary<GLSLstd450InverseSqrt>},
 };
 
 const static Defs emptyDefs = {};
