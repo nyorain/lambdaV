@@ -1,4 +1,4 @@
-# λ-V to SPIR-V compiler
+# λV to SPIR-V compiler
 
 Final project for CPSC 539B: Compiler theory. This models a compiler from
 a simple made-up programming language with functional concepts (developed
