@@ -71,4 +71,16 @@ bool isFunction(const Expression& expr, const std::vector<Definition>& defs) {
 	}
 }
 
----
+```
+
+# discoveries
+
+`let` is basically a `func` with the associated values given as arguments.
+
+```
+(let ((a 7)) a)
+; is the same as
+((func (a) a) 7)
+```
+
+

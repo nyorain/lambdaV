@@ -79,7 +79,7 @@ struct BackEdge {
 };
 
 struct RecData {
-	u32 header;
+	// u32 header;
 	u32 cont;
 
 	std::vector<u32> paramTypes;
@@ -138,6 +138,7 @@ GenExpr generateIf(const RecContext& ctx, const Location& loc,
 
 	auto ptt = std::get_if<PrimitiveType>(&et.type);
 	auto rt = ptt && *ptt == PrimitiveType::eRecCall;
+	auto tsrc = ctx.codegen.block;
 	if(!rt) {
 		write(buf, spv::OpBranch, dstlabel);
 	}
@@ -149,6 +150,7 @@ GenExpr generateIf(const RecContext& ctx, const Location& loc,
 
 	auto ptf = std::get_if<PrimitiveType>(&ef.type);
 	auto rf = ptf && *ptf == PrimitiveType::eRecCall;
+	auto fsrc = ctx.codegen.block;
 	if(!rf) {
 		write(buf, spv::OpBranch, dstlabel);
 	}
@@ -167,7 +169,7 @@ GenExpr generateIf(const RecContext& ctx, const Location& loc,
 		// otherwise we need phi instruction
 		auto phi = ++ctx.codegen.id;
 		write(buf, spv::OpPhi, et.idtype, phi,
-			et.id, tlabel, ef.id, flabel);
+			et.id, tsrc, ef.id, fsrc);
 
 		return {phi, et.idtype, et.type};
 
@@ -502,7 +504,7 @@ GenExpr generateRecFunc(const RecContext& ctx, const Location& loc,
 	write(cg.buf, spv::OpLabel, lb);
 
 	// insert function body
-	rec.header = hb;
+	// rec.header = hb;
 	rec.cont = cb;
 	auto nctx = RecContext {cg, ndefs, &rec};
 	cg.block = cb;

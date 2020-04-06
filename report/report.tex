@@ -1,0 +1,909 @@
+\documentclass[letterpaper,12pt]{article}
+
+\usepackage{amsmath,amssymb,graphicx,hyperref,enumerate,bussproofs,turnstile,listings}
+\usepackage[dvipsnames]{xcolor}
+\usepackage{tabularx}
+
+\usepackage[paper=letterpaper,left=25mm,right=25mm,top=25mm,bottom=25mm]{geometry}
+\usepackage{fancyhdr} %% for details on how this work, search-engine ``fancyhdr documentation''
+\pagestyle{fancy}
+
+\lhead{CPSC 539B: Compiler Theory} 
+\chead{Project: $\lambda$V}
+\rhead{Jan}
+\cfoot{Page \thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\footrulewidth}{0.4pt}
+
+\newcommand{\vi}{\vec{I}}
+
+\lstset{ 
+	basicstyle=\footnotesize,
+	tabsize=2,
+}
+
+\begin{document}
+
+\section{Introduction}
+
+We present the translation from a simple high-level language with
+functional elements and LISP-like syntax to SPIR-V, an abstract
+assembly language for GPU shaders and kernels.
+
+\section{Source language: $\lambda$V}
+
+Our source language is a simple shader language with functional elements.
+To keep proofs and formalization minimal, we will only look at a simple
+version of $\lambda$V (basically a subset of what I implemented~\footnote{See 
+\url{https://github.com/nyorain/lambdaV} for my experiments with implementing
+a real compiler, a lot of the formal proof here is actually quite close
+to the compiler source code}): \\
+We only look at fragment shaders and only allow a single observation:
+one output to the framebuffer. This isn't too much of a simplification
+for fragment shaders and modeling writes to multiple framebuffer attachments
+as well as inputs shouldn't be too difficult but just more writing work.
+Similarly, there isn't a huge difference to other shader types (such as 
+vertex or compute shaders) except that those usually produce more or
+different observations and therefore one just once again needs to model the
+observations in a more complicated way (especially when allowing
+arbitrary buffer or image stores as needed to make compute shaders
+useful). But I don't expect the simplified model we use here to be too hard
+to extend to cover the given cases.
+
+The syntax of $\lambda$V is as simple as possible. Expressions
+can be numbers, true or false, an identifier or a list (consisting of zero or
+more expressions). There would be no advantage in encoding builtins such
+as $+$, $func$ or $if$ into the syntax of the language. Those are simply
+pre-defined identifiers. In practice, keeping the syntax this simple has 
+the advantage that writing a parser and AST representation is extremely trivial.
+
+\begin{align*}
+	e &::= num \:|\: true \:|\: false \:|\: \textit{identifier} \:|\: (l) \\
+	l &::= \varnothing \:|\: e\:l
+\end{align*}
+
+
+\section{The target language: SPIR-V}
+
+SPIR-V~\footnote{https://www.khronos.org/registry/spir-v/specs/unified1/SPIRV.html}
+is an SSA-form abstract typed assembly language. It has
+similarities to LLVM IR but is more limited: no dynamic dispatch,
+i.e. no function pointers, no memory allocations, no stack frame and
+most runtimes (i.e. where SPIR-V modules can be used as shaders or
+kernels) don't allow recursion, see for instance the Vulkan 
+specification\footnote{\url{https://www.khronos.org/registry/vulkan/specs/1.2/html/chap35.html\#spirvenv}}
+for this. On the other hand, SPIR-V provides some 
+GPU-specific primitives.
+It's specification does not give operational semantics - or 
+any formal specification - at all but rather describes the layout 
+and semantics in plain text. To formally argue about correctness we need 
+to model at least some form of operational semantics though. We will
+only consider the subset of SPIR-V used by our compiler though.
+For instance, our compiler never output any functions (apart from the
+main entrypoint) so we don't care for that.
+
+Our judgment looks like this: $M, \vi, ID, ID \rightarrow M, \vi, ID, ID$.
+$ID$ is a SPIR-V identifier, i.e. just a number.
+$M$ is of the form $[id \mapsto V] ... $ the memory and maps IDs to values. Values can be 
+\begin{itemize}
+	\item instruction blocks of form $\vi$
+	\item values of form $(V, \tau)$, where the second value is the type,
+	% \item type expressions, declaring new types. For instance $Float(i)$,
+	% 	declaring a floating point type of $i$ bits or $Vec(t, c)$,
+	% 	declaring a vector type of scalar type $t$ with $c$ components.
+\end{itemize}
+$\vi$ is an instruction vector.
+Furthermore, the function has inputs and outputs for the current and previous
+block IDs, this is needed to resolve SSA phi instructions.
+
+We formally model execution of a (valid) SPIR-V module like this: when the module
+is loaded, all constants and types (declared in the header) are loaded
+into a memory $M$. All instruction blocks are loaded into the memory as well,
+removing the first $OpLabel$ instruction that is only used to identify
+the blocks with an id.
+The header of the SPIR-V module defines the entry point function.
+Execution looks up the first block in the function (functions must start with 
+a label defining the block id) $(\vi_{entry}, id_{entry})$ and then behaves as specified
+by the operational semantics for $M, \vi_{entry}, id_{entry}, 0)$.
+
+We represent SPIR-V in the standard textual assembly format, with the new ID
+defined by the instruction (if any) on the left of the ``='' sign.
+
+\subsection{Control flow}
+
+\begin{prooftree}
+	\AxiomC{$M(tid) = \vi_t$}
+	\UnaryInfC{$M, (\text{OpBranch}\: id_t), c, p \rightarrow M, \vi_t, id_t, c$}
+\end{prooftree}
+
+\begin{prooftree}
+	\AxiomC{$M(id_c) = (true, Bool)$}
+	\AxiomC{$M(id_t) = \vi_t$}
+	\BinaryInfC{$M, (\text{OpBranchConditional}\:id_c\:id_t\:id_f), c, p \rightarrow M, \vi_t, id_t, c$}
+\end{prooftree}
+
+\begin{prooftree}
+	\AxiomC{$M(id_c) = (false, Bool)$}
+	\AxiomC{$M(id_f) = \vi_f$}
+	\BinaryInfC{$M, (\text{OpBranchConditional}\:id_c\:id_t\:id_f), c, p \rightarrow M, \vi_f, id_f, c$}
+\end{prooftree}
+
+\begin{prooftree}
+	\AxiomC{$p = parent_i$}
+	\AxiomC{$M(var_i) = V$}
+	\AxiomC{$M' = M[id_r \mapsto V]$}
+	\TrinaryInfC{$M, (id_r = \text{OpPhi}\:id_{type}\: var_1\:parent_1 \dots var_n\:parent_n, \vi), c, p \rightarrow M', \vi, c, p$}
+\end{prooftree}
+
+\subsection{Computations}\label{sec:computations}
+
+Most instructions simply run a computation. Defining the operational
+semantics for those is not too interesting and defining all the rules
+for the various functions wouldn't be helpful. They all look more or less
+like this example we give for floating point addition:
+
+\begin{prooftree}
+	\AxiomC{$M(id_1) = (num_1, Num)$}
+	\AxiomC{$M(id_2) = (num_2, Num)$}
+	\AxiomC{$M' = M[id_r \mapsto fadd(num_1, num_2)]$}
+	\TrinaryInfC{$M, (id_r = \text{OpFAdd}\:id_{type}\:id_1\:id_2, \vi), c, p \rightarrow M', \vi, c, p$}
+\end{prooftree}
+
+where $fadd$ simply encodes the semantics of the addition of two numbers.
+Interestingly enough, SPIR-V does not specify how overflow or special
+cases (infinity or NaN arguments) are handled. Instead, this is usually
+specified in the runtime environment. We can for instance look once again into the vulkan
+specification. It specifies that ``By default, the implementation may 
+perform optimizations on half, single, or double-precision floating-point 
+instructions that ignore sign of a zero, or assume that arguments 
+and results are not NaNs or infinities.'' and ``NaNs may not be generated. 
+Instructions that operate on a NaN may not result in a NaN.''.
+Basically everything that uses or results in special floating point
+values is undefined behavior, more or less. 
+Newer SPIR-V versions support a flag signaling that infinities and NaNs 
+must be preserved (since SPIR-V 1.4) but we also want to target SPIR-V 1.0
+and implementations that do not provide the optional support for
+this flag.
+Given these non-guarantess, we can't even check for infinity or NaN
+\textit{after} we do an operation since then we might already have
+triggered undefined behavior, at least that is my interpreation of
+this specification. But checking whether an operation might overflow
+(or similar) is a pain (maybe not even possible, given that Vulkan and
+SPIR-V give their implementations some freedom regarding
+rounding of values returned by computations).
+
+I couldn't actually find a solution for this yet. I tried to get
+a clarification on this section in the Vulkan spec and found I was not
+the first person confused about it, see \href{https://github.com/KhronosGroup/Vulkan-Docs/issues/961}{Vulkan-Docs issue 961}.
+Possible solutions included these:
+
+\begin{itemize}
+	\item Just make any overflow or similar undefined in the source language
+		as well. I don't want to do this since one of the main motivations
+		in the first place was to get an target language program
+		that is as deterministic as possible (at least detecting triggered
+		undefined behavior).
+	\item Actually evaluating whether an operation would operate on or
+		return infinity or NaN at runtime. For each operation. That's
+		such a huge pain. I'm not even thinking about runtime cost here,
+		implementing a check that safely evaluates whether addition
+		(and multiplication, division, exp, exp2, pow, \ldots) of floating
+		point numbers would give such a result seems like a lot of work
+		and definitely not a sane solution to me.
+	\item Just outputting SPIR-V 1.4 (or using the previously available
+		extension) and requiring support for this flag. That is what
+		I went with in the end since my hardware supports it and it
+		makes a big issue just go away, basically. Now, most computations
+		don't ever trigger any undefined behavior.
+\end{itemize}
+
+There are still some instructions, however, that trigger undefined
+behavior.
+
+\subsection{Ignored instructions}
+
+There are meta-instructions that must be inserted into a SPIR-V module
+for correcntess that don't have an impact on the semantics, like
+the OpSelectionMerge and OpLoopMerge that provide meta-information
+about the control flow. Furthermore there are debug instructions,
+allowing to associate source-language line numbers or variables names with
+SPIR-V code. We simply ignore all those instructions, treating them
+the same way we treat OpNop:
+
+\begin{prooftree}
+	\AxiomC{}
+	\UnaryInfC{$M, (\text{OpNop}, \vi), c, p \rightarrow M, \vi, c, p$}
+\end{prooftree}
+
+
+\section{Types in $\lambda$V}
+
+$\tau ::= Num \:|\: 
+	Bool \:|\: 
+	Vec(\{2, 3, 4\}, \{f, b\}) \:|\: 
+	Mat(\{2, 3, 4\}, \{f, b\}) \:|\: 
+	Rec\:\tau \:|\: 
+	PureRec$ \\
+
+Num is a type for all numbers. We don't seperate between integers and floating
+point numbers, we just assume all numbers to be floating-point for simplicity
+and since GPUs are usually optimized for that anyways. For logical true and
+false, we have Bool. Then, we have various Vector and Matrix types (with
+dimensions 2, 3 or 4 and floating point ``f'' or boolean ``b'' elements).
+We simplicity, we only allow square-sized matrices at the moment, other
+ones are rarely needed in shaders anyways. 
+The types $Rec \tau$ and $PureRec$ have nothing to do with
+recursive types but are just helper types that
+allow us to model the restriction we have to put on recursive functions
+(namely: only tail-recursion is allowed) while still deducing the types of
+recursive expressions. This is probably the only interesting thing about
+the type system. How exactly the types are used should become apparent from
+the typing rules below.
+To allow minimizing the number of rules and distinct cases, we will
+write $Vec(1, {b,f})$ as synonym for $Bool$ or $Num$, respectively.
+
+Our typing judgment has the following form: \\
+\begin{center}
+\fbox{\begin{minipage}{15em}
+	\begin{equation*}
+	R, A \vdash e : \tau
+	\end{equation*}
+\end{minipage}}
+\end{center}
+
+$R$ is a \textit{recursive context}, as explained below.
+$A$ is a tuple of tuple of expressions, representing the current
+stack of call arguments.
+Both $R$ and $A$ are basically needed as workaround for not typing
+functions while allowing them in almost any context (there are some
+technical limitations discussed below).
+A typing judgement means that $e$ is of type $\tau$ (in context $R$).
+We also use $T, U$ as type metavariables.
+[I guess this is fairly common but for tuples we write $((a_1 \dots), a_2)$
+for $(a_1 \dots a_2)$, i.e. appending to a tuple].
+
+\begin{prooftree}
+	t-num
+	\AxiomC{}
+	\UnaryInfC{$R, \varnothing \vdash num : Num$}
+\end{prooftree}
+
+\begin{prooftree}
+	t-true
+	\AxiomC{}
+	\UnaryInfC{$R, \varnothing \vdash true : Bool$}
+\end{prooftree}
+
+\begin{prooftree}
+	t-false
+	\AxiomC{}
+	\UnaryInfC{$R, \varnothing \vdash false : Bool$}
+\end{prooftree}
+
+\begin{prooftree}
+	t-if
+	\AxiomC{$\varnothing, \varnothing \vdash e_1 : Bool$}
+	\AxiomC{$R, A \vdash e_2 : tau_1$}
+	\AxiomC{$R, A \vdash e_3 : tau_2$}
+	\TrinaryInfC{$R, A \vdash (if\: e_1\: e_2\: e_3) : \text{rec-match}(tau_1, tau_2)$}
+\end{prooftree}
+
+\begin{prooftree}
+	t-app
+	\AxiomC{$R, (A, (e_1 \dots e_n)) \vdash e_0 : \tau$}
+	\UnaryInfC{$R, A \vdash (e_0\:e_1 \dots e_n) : \tau$}
+\end{prooftree}
+
+\begin{prooftree}
+	t-func
+	\AxiomC{$R, A_r \vdash e[e_1 / id_1]\dots[e_n / id_n] : \tau$}
+	\UnaryInfC{$R, (A_r, (e_1 \dots e_n)) \vdash (func\:(id_1 \dots id_n)\:e) : \tau$}
+\end{prooftree}
+
+\begin{prooftree}
+	t-rec-func
+	\AxiomC{$R, \varnothing \vdash e_i : \tau_i$}
+	\AxiomC{$\vec{\tau_i}, \varnothing \vdash e[e_1 / id_1]\dots[e_n / id_n] : Rec\:\tau$}
+	\BinaryInfC{$R, ((e_1 \dots e_n)) \vdash (\text{rec-func}\:(id_1 \dots id_n)\:e) : \tau$}
+\end{prooftree}
+
+\begin{prooftree}
+	t-rec
+	\AxiomC{$n > 0$}
+	\AxiomC{$len(\tau_i) = n$}
+	\AxiomC{$\varnothing, \varnothing \vdash e_i : \tau_i$}
+	\TrinaryInfC{$\vec{\tau_i}, ((e_1 \dots e_n)) \vdash rec : PureRec$}
+\end{prooftree}
+
+\begin{prooftree}
+	t-let
+	\AxiomC{$R, A \vdash e[id_1 / e_1]\dots[id_n / e_n] : \tau$}
+	\UnaryInfC{$R, A \vdash (let\:((id_1\:e_1)\dots(id_n\:e_n))\:e) : \tau$}
+\end{prooftree}
+
+Substituion is assumed to be context-sensitive (i.e. only substitute those
+identifiers that are really meant in that case and not those that are
+redefined in a deeper scope), as usually.
+
+The helper function \textit{rec-match} combines two different types in a
+recursive context. 
+
+\[
+	rec-match(\tau_1, \tau_2) := 
+	\begin{cases}
+		\tau_1, & \text{for } \tau_1 = \tau_2, \\
+		\tau_1, & \text{for } \tau_1 = Rec\:\tau_2, \\
+		\tau_2, & \text{for } \tau_2 = Rec\:\tau_1, \\
+		\tau_2, & \text{for } \tau_1 = PureRec \land \tau_2 = Rec\:T, \\
+		\tau_1, & \text{for } \tau_2 = PureRec \land \tau_1 = Rec\: T, \\
+		Rec\:T, &  \text{for } \tau_2 = PureRec \land \tau_1 = T \text{ (where T isn't $PureRec$ or $Rec\, U$)}, \\
+		Rec\:T, &  \text{for } \tau_1 = PureRec \land \tau_2 = T \text{ (where T isn't $PureRec$ or $Rec\, U$)}
+	\end{cases}
+\]
+
+\textit{PureRec} is the type of a \textit{rec} call but
+when we have an \textit{if} expression where one branch just results
+in a \textit{rec} call, i.e. having type \textit{PureRec} while the
+the other branch contains a  value of type $\tau$ (or $Rec\: \tau$), we can deduce 
+that the function must return a value of type $\tau$ in general.
+But instead of giving this \textit{if} expression then the type $\tau$,
+we give it the type $Rec\: \tau$ since the returned value can't be used
+for any further computations (except control flow, at the moment this
+only means \textit{if}). Furthermore, this type system encodes
+the requirement for \textit{rec-func} constructs to have at least one
+\textit{rec} call in its body (since typing requires the body of \textit{rec-func}
+to be of type \textit{Rec $\tau$}).
+
+When typing expressions inside a \textit{rec-func} construct, the recursive 
+context $R$ holds the types the \textit{rec-func} was called with. This means
+that one cannot call recursive functions with function objects (since they
+are not typed). In practice
+this is a technical limitation we cannot overcome since SPIR-V does not support
+dynamic dispatch and allowing recursion on arbitrary (possibly different
+for each recursive call) functions yields cases where we can't inline
+function calls anymore, i.e. can't unroll recursive functions to simple loops.
+In practice, we could put a more relaxed restriction on our type system:
+It is allowed to call recursive functions with function values as long
+as all recursive calls use the same function value. Or even more general:
+As long as there is only a finite number of functions used in the
+recursive calls (meaning basically that you recurse with newly
+instantianted functions in each recursion, it should be somewhat intuitive
+that a case like that can't be inlined/unrolled anymore). But that
+is a much more complicated restriction, yields a more complex type system
+and code generation. And in practice one can simply use workarounds.
+For instance:
+
+\begin{lstlisting}
+(let ((nat-fold (func (n accum f) (
+	let ((body (rec-func (n accum) (
+			if (eq n 0)
+				accum
+				(rec (- n 1) (f accum n))
+		))))
+		(body n accum)
+)))) ... )
+\end{lstlisting}
+
+One can use function value parameters in recursive functions
+by simply defining a non-recursive wrapper function.
+
+The author did not know about the Curry paradox and functional
+recursive combinators (maybe he shouldn't have picked a functional source language)
+and one can write recursive expressions like that in $\lambda$V as well.
+Below is a (simple) example showing how simple $func$ constructs can
+be (ab-)used to get recursion.
+
+\begin{lstlisting}
+(let 
+	((sumup (func (self n) 
+		(if (eq n 0) 0 (+ n (self self (- n 1)))))))
+	(sumup sumup 10))
+\end{lstlisting}
+
+But those expressions are not well-typed in our source language.
+There is no (finite) derivation tree
+for the well-typedness of the example expression since we define our
+type rules by substituion, meaning that for recursive function constructs
+like this one would need an infinitely large derivation tree (independent
+from whether or not the expression actually terminates).
+In short: we expect programmers to play nice and use the \textit{rec-func}
+construct we provide since we can't support arbitrary recursion. Sadly.
+
+There are furtheremore a lot of more uninteresting typing rules for
+the builtin primitives such as arithmetic or trigonometric functions.
+We annotate those builtins with types (just some examples in the list below):
+
+\begin{itemize}
+	\item $Vec(I,f) \rightarrow Vec(I,f)$, e.g. the unary minus, fract, exp
+	\item $Vec(I,f) \rightarrow Num$, e.g. length
+	\item $Vec(b,f) \rightarrow Bool$, e.g. any-of
+	\item $Vec(I,f) \times Vec(I,f) \rightarrow Vec(I,f)$, e.g. plus
+	\item $Vec(I,f) \times Vec(I,f) \rightarrow Num$, e.g. distance
+	\item $Vec(I,T) \times Vec(I,T) \rightarrow Vec(I,b)$, e.g. less-than or equal
+\end{itemize}
+
+Note that the generic $i$ must be the same for all parameters/return types.
+This allows us to just give one generic rule for all of those builtins:
+
+\begin{prooftree}
+	\AxiomC{$builtin$ of type $(\tau_1 \dots \tau_n) \rightarrow \tau$}
+	\AxiomC{$\varnothing, \varnothing \vdash e_i : \tau_i$}
+	\BinaryInfC{$R, \varnothing \vdash (builtin\:e_1 \dots e_n) : \tau$}
+\end{prooftree}
+
+
+\section{$\lambda$V operational semantics}
+
+To reason about correctness properties of our translation, we will define
+small-step operational semantics for $\lambda$V.
+
+\begin{prooftree}
+	\AxiomC{}
+	\UnaryInfC{$(let\:((id_1\:e_1)\dots(id_n\:e_n))\:e) \rightarrow e[e_1 / id_1]\dots[e_n / id_n]$}
+\end{prooftree}
+
+\begin{prooftree}
+	\AxiomC{}
+	\UnaryInfC{$(if\:true\:e_2\:e_3) \rightarrow e_2$}
+\end{prooftree}
+
+\begin{prooftree}
+	\AxiomC{}
+	\UnaryInfC{$(if\:false\:e_2\:e_3) \rightarrow e_3$}
+\end{prooftree}
+
+\begin{prooftree}
+	\AxiomC{}
+	\UnaryInfC{$((func\:(id_1 \dots id_n)\:e)\:e_1 \dots e_n) \rightarrow e[e_1 / id_1]\dots[e_n / id_n]$}
+\end{prooftree}
+
+\begin{prooftree}
+	\AxiomC{}
+	\UnaryInfC{$((\text{rec-func}\:(id_1 \dots id_n)\:e)\:e_1 \dots e_n) \rightarrow e[e_1 / id_1]\dots[e_n / id_n][(\text{rec-func}\:(id_1 \dots id_n)\:e) / rec]$}
+\end{prooftree}
+
+The reduction rule for builtins are intuitively defined, just copying
+the underlying SPIR-V (and target environment, e.g. Vulkan) semantics,
+which in turn usually just refer to the IEEE floating point standard.
+
+The design decision we made for handling the (by default ill-defined)
+issues like overflow, infinities and NaN's in Section \ref{sec:computations}
+is important here since it significantly modifies the semantics of
+those builtins in SPIR-V. Otherwise we would transitively introduce a lot of
+undefined behavior in our source language.
+
+% TODO: nope, this is a big pile of bullshit. Actually take the time to
+% model undefined behavior in source and target language (and
+% add the respective checks to the translation). Point out that
+% this is something we just do in our formal model and not in the
+% actual compiler because just using an extra, translation- and
+% source lanauge independent SPIR-V pass makes more sense?
+% But to be honest, then why even mention it here at all?
+% Maybe just explain this in the motivation and leave it out of this?
+% But definitely say something about it here!
+
+%% A goal of our compiler is to make undefined behavior observable but I
+%% found trying to prove this quite pointless. We can model undefined
+%% behavior in the target language and add some kind of extra observation
+%% for this to our operational semantics of the source language. But this
+%% makes everything more complicated while not really helping to establish
+%% trust in anything, since the main point of every proof would be us
+%% identifying each and every source of undefined behavior in the
+%% SPIR-V prose-specification.
+
+\newcommand{\conv}{\rightarrow^+}
+\newcommand{\red}{\rightarrow^*}
+
+The conversion semantics are fairly simple due to our general list syntax:
+
+\begin{prooftree}
+	\AxiomC{$\vdash e \rightarrow e'$}
+	\UnaryInfC{$\vdash e \conv e'$}
+\end{prooftree}
+
+\begin{prooftree}
+	\AxiomC{$\vdash e_i \conv e_i'$}
+	\UnaryInfC{$\vdash (\dots e_i \dots) \conv (\dots e_i' \dots)$}
+\end{prooftree}
+
+Reduction semantics:
+
+\begin{prooftree}
+	\AxiomC{}
+	\UnaryInfC{$\vdash e \red e$}
+\end{prooftree}
+
+\begin{prooftree}
+	\AxiomC{$\vdash e \conv e''$}
+	\AxiomC{$\vdash e'' \red e'$}
+	\BinaryInfC{$\vdash e \red e'$}
+\end{prooftree}
+
+As usually, we define a evaluation function, $eval_\lambda(e) = o$,
+that is defined as the observation $o$ that $e$ can be reduced to.
+All possible observations in our simplified version of the source language
+is a single $Vec(I,f)$, the value written to the framebuffer by the
+fragment shader.
+
+\section{Translation}
+
+We model translation as a recursive function \textit{translate}:
+
+\begin{center}
+\fbox{\begin{minipage}{15em}
+	\begin{align*}
+		% R_i &::= \{hb: ID, cb: ID\} \\
+		BackEdge &::= (ID, ID*) \\
+		R_o &::= BackEdge* \\
+		CE &::= e \:|\: genexpr(ID, \tau) \\
+		ID &::= \text{SPIR-V numeral ID} \\
+		D &::= identifier \rightarrow (CE, D) \\
+		A &::= (D, ce*)* \\
+		C &::= [ID \mapsto Num]* \\
+		\\
+		Input &::= \{expr: CE, defs: D, args: A, idc: ID, idl: ID, rec: ID\} \\
+		Output &::= \{code: \vi, consts: C, ido: ID, idc: ID, idl: ID, type: \tau, rec: R_o\} \\
+		\\
+		translate&: Input \rightarrow Output
+		% (ce \times D \times R_i \times A \times ID) &\rightarrow (C \times ID \times ID \times ID \times \vi \times R_o) \\
+		% (expr \times defs \times r_i \times args \times id_c) &\mapsto (consts \times id_o \times id_t \times id_c \times instructions \times r_o) \\
+	\end{align*}
+\end{minipage}}
+\end{center}
+
+\textbf{Input.expr} is simply the expression to be translated. We extend expressions
+by an intermediate type generated during translation, an already translation
+expression holding its ID and its type. \\
+% $ce ::= e \:|\: genexpr(ID, ID, \tau)$
+\textbf{Input.defs} is a mapping from identifiers to expressions and their environment.
+This is basically how we realize context-sensitive substitution in our
+translation. \\
+\textbf{Input.rec} and \textbf{Output.rec} are information needed to generate recursive
+functions. Inside a \textit{rec-func} construct, \textbf{Input.rec} is the block 
+ID of the continue block, to which recursive calls should jump. \\
+%, as well as the type IDs of its parameters.
+\textbf{Output.rec} is a set of blocks and their respective parameter IDs for
+recursvie calls (i.e. edges to the continue block). \\
+\textbf{Input.args} models the current argument call stack, pretty much the same
+way we modeled it for our typing rules. This is once again needed because
+we can't translate function expressions on their own. \\
+\textbf{ID} represents a SPIR-V ID. \\
+\textbf{Input.idc} is the next usable ID. \\
+\textbf{Input.idl} is the ID of the current code generation block (i.e. label). \\
+\textbf{Output.ido} is the ID holding the result of the translated expression. \\
+% \textbf{Output.idt} is the ID of the type of the generated expression. \\
+\textbf{Output.idc} is the next usable ID after the translation.
+E.g. if a translation of an expression gets $Input.idc = 42$ as input, 
+uses IDs 42, 43, 44 and 45, it returns 46 as $Output.idc$. \\
+\textbf{Output.idl} is the label the code generation finishes in.
+This is different iff code generation inserts a new $OpLabel$ instruction,
+i.e. starting a new basic block. \\
+
+% There is one input and one output ($id_c$)
+% to the translation function for the next usable id (e.g. if a translation of an
+% expression gets 42 as input, uses IDs 43, 44 and 45, it returns 46).
+% The $id_o$ output is the ID the value generated by the expression is stored in.
+% The $id_t$ output is the type ID of the generated expression.
+
+\textit{Output.consts} is a set of defined constant instructions. In SPIR-V constants
+cannot be defined inline but have to be defined in a special section before
+the start of the program, that's why keep them as a separate vector.
+
+\textit{Output.type} is the type of the generated expression.
+
+Finally, \textit{Output.code} is the generated SPIR-V instruction vector.
+
+\subsection{Translation: utility}
+
+We define the function as a set of conditions in which $translate(I) = O$
+is defined. The next sections will present a set of conditions for each
+expression, you can basically imagine each section being one (giant)
+derivation rule for the defining judgment $translate(I) = O$
+with all the conditions as premises. 
+
+We first need a utility function $ioa$, modeling
+the \textit{insert or assign} semantic of a mapping (in our compiler
+we simply use a hash map):
+
+\[
+	ioa(D, id \mapsto v)(id_c) :=
+	\begin{cases}
+		v & \text{for } id = id_c \\
+		D(id_c) & \text{otherwise}
+	\end{cases}
+\]
+
+We write $ioa(D, (id \mapsto v)^*))$ as a shortcut for subsequent
+insertion/replacement, \\
+\[
+	ioa(ioa( \dots ioa(D, id_1 \mapsto v_1) \dots ), id_n \mapsto v_n)
+\]
+
+Furthermore, when generating the SPIR-V module from a full $\lambda$V program,
+we define all types in the header (giving them IDs) and can therefore define a
+function $typeid: \tau \rightarrow ID$ that returns the SPIR-V type ID
+associated with a given type in our formalization. 
+We define $typeid(Rec \tau) = typeid(\tau)$. The expression $typeid(PureRec)$
+is intentionally undefined, it is never needed for well-defined programs.
+Similar to the way we declare types once and can then use them via their
+IDs during the translation, we also define the constants $true$ and $false$
+once and are able to use them during translation. Their translation
+rules are not shown below since they are therefore trivial (basically
+a no-op, just returning the ID of the respective constant).
+
+\subsection{Translation: func}
+
+This is probably the most interesting (and yet one the most simple) translation
+rules: to translate a function call we simply translate its body
+(effectively always inlining the function) and replace all occurrences of 
+function parameter with translations of the expressions bound to them (see
+the translation of identifiers in the next subsection). Of course, this
+might lead to code bloat, when huge functions or complex expression passes
+as paremters are inlined. This compiler doesn't care too much and
+separate optimization passes can still perform common subexpression
+elimination or similar (they could technically even refactor code that
+is generated multiple times out into its own function, if possible).
+The reason we translate functions (or rather: function calls; we can't translate
+function in itself, remember how they are not even valid expressions since
+not typed at all) like this even though SPIR-V offers functions is that
+there is no dynamic dispatch in SPIR-V. Therefore force-inlining basically
+everything is the only way to get higher-order functions (well, with
+the restrictions outlined in the beginning).
+
+\medskip
+\begin{tabularx}{\linewidth}{rl}
+	I.expr &= (func ($id_1 \dots id_n$) e) \\
+	I.args &= ($A_r$, (ndefs, $e_1 \dots e_n$)) \\
+	ndefs &:= ioa(I.defs, ($id_i \mapsto e_i$), ndefs)\dots) \\
+	O &= translate(\{expr: e, defs: ndefs, args: $A_r$, idc: I.idc, idl: I.idl, rec: I.rec\}) \\
+\end{tabularx}
+
+\subsection{Translation: identifier}
+
+\begin{tabularx}{\linewidth}{rl}
+	I.expr &= identifier \\
+	I.defs(identifier) &= (e, ndefs) \\
+	O &= translate(\{expr: e, defs: ndefs, args: I.args, idc: I.idc, idl: I.idl, rec: I.rec\}) \\
+\end{tabularx}
+
+\subsection{Translation: numbers}
+
+All constants must be declared in the SPIR-V header, we therefore
+don't generate code for a constant number but simply return our
+constant definition (in O.consts) and return the id of the constant.
+
+\begin{tabularx}{\linewidth}{rl}
+	I.expr &= \textit{num} \\
+	I.args &= $\varnothing$ \\
+	O.code &= $\varnothing$ \\
+	O.consts &= [I.idc $\mapsto$ \textit{num}] \\
+	O.idc &= I.idc + 1 \\
+	O.type &= Num \\
+	O.idl &= I.idl \\
+	O.rec &= $\varnothing$ \\
+\end{tabularx}
+
+\subsection{Translation: let}
+
+\begin{tabularx}{\linewidth}{rl}
+	I.expr &= (let (($id_1 e_1) \dots (id_n e_n)$) e) \\
+	ndefs &:= ioa(I.defs, ($id_i \mapsto e_i$), I.defs)\dots) \\
+	O &= translate(\{expr: e, defs: ndefs, args: I.args, idc: I.idc, idl: I.idl, rec: I.rec\}) \\
+\end{tabularx}
+
+\subsection{Translation: list}
+
+This translation rule is only useful (and well-defined) when $e_0$ isn't
+an atomic expression such as $(func \dots)$ or a builtin. \\
+
+\medskip
+\begin{tabularx}{\linewidth}{rl}
+	I.expr &= ($e_0$ $e_1$ \dots $e_n$) \\
+	nargs &:= (I.args, (I.defs, $e_1$\dots$e_n$)) \\
+	O &= translate(\{expr: $e_0$: I.defs, args: nargs, idc: I.idc, idl: I.idl, rec: I.rec\}) \\
+\end{tabularx}
+
+\subsection{Translation: if}
+
+This is the first translation actually generating SPIR-V code. The main
+complexity in this translation is handling cases where one (or both) of the
+given branches is just a recursive call (i.e. of type $PureRec$).
+
+\medskip
+\begin{tabularx}{\linewidth}{rl}
+	I.expr &= (if $e_c$ $e_t$ $e_f$) \\
+	$O_c$ &= translate(\{expr: $e_c$, defs: defs, args: I.args, idc: I.idc + 4, idl: I.idl, rec: $\varnothing$\}) \\
+	$O_t$ &= translate(\{expr: $e_t$, defs: defs, args: I.args, idc: $O_c$.idc, idl: I.idc + 0, rec: I.rec\}) \\
+	$O_f$ &= translate(\{expr: $e_f$, defs: defs, args: I.args, idc: $O_f$.idc, idl: I.idc + 1, rec: I.rec\}) \\
+
+	O.consts &= consts: $O_c$.consts $O_t$.consts $O_f$.consts \\
+	O.ido &= I.idc + 4 \\
+	O.idl &= I.idc + 2 \\
+	O.type &= 
+	$\begin{cases} 
+		O_t.type & \text{for } O_f.type = PureRec \\
+		O_f.type & \text{otherwise} \\
+	\end{cases}$ \\
+	O.idc &= $O_f$.idc \\
+	O.rec &= $O_t$.rec, $O_f$.rec \\
+\end{tabularx}
+
+\medskip
+$O.code$ is defined as: \\
+\begin{tabularx}{\linewidth}{rll}
+	& $O_c$.code \\
+	& OpSelectionMerge (I.idc + 4) None \\
+	& OpBranchConditional $O_c$.ido (I.idc + 1) (I.idc + 2) \\
+	\cline{1-2}
+	(I.idc + 0) = &OpLabel \\
+	& $O_t$.code \\
+	& OpBranch (I.idc + 3) & \textbf{[if $O_t$.type $\neq$ PureRec]} \\
+	\cline{1-2}
+	(I.idc + 1) = &OpLabel \\
+	& $O_f$.code \\
+	& OpBranch (I.idc + 3) & \textbf{[if $O_f$.type $\neq$ PureRec]} \\
+	\cline{1-2}
+	(I.idc + 2) = &OpLabel & \textbf{[if $O$.type $\neq$ PureRec]} \\
+	(I.idc + 3) = &OpPhi typeid(O.type) & \textbf{[if $O$.type $\neq$ PureRec]} \\
+		& \quad $O_t$.ido (I.idc + 1) & \quad \textbf{[if $O_t$.type $\neq$ PureRec]} \\
+		& \quad $O_f$.ido (I.idc + 2) & \quad \textbf{[if $O_f$.type $\neq$ PureRec]} \\
+\end{tabularx}
+
+\subsection{Translation: Computations}
+
+The various builtins are intuitively translated to a single instruction.
+For instance, a translation of the ``vec4'' builtin, using
+4 numbers to construct a \textit{Vec(4,f)} could look like this:
+
+\medskip
+\begin{tabularx}{\linewidth}{rl}
+	I.expr &= vec4 \\
+	I.args &= ((ndefs, $e_1$ $e_2$ $e_3$ $e_4$)) \\
+	$O_0$ &= \{idc: I.idc + 1\} \\
+	$O_i$ &= translate(\{expr: $e_i$, defs: ndefs, args: $\varnothing$, idc: $O_{i - 1}$.idc, idl: I.idl, rec: $\varnothing$\}) \dots \\
+	O.idc &= $O_4$.idc \\
+	O.ido &= I.idc + 1 \\
+	O.type &= Vec(4, f) \\
+	O.rec &= $\varnothing$ \\
+	O.consts &= $O_i.consts$ \dots \\
+	O.code &= (I.idc + 1) = OpCompositeConstruct typeid(Vec(4, f)) $O_1$.ido $O_2$.ido $O_3$.ido $O_4$.ido \\
+\end{tabularx}
+
+\newpage
+\subsection{Translation: rec-func}
+
+Translating \textit{rec-func} is by far the most complicated translation.
+Since most SPIR-V runtimes don't allow recursion (GPUs traditionally
+don't have a stack) we have to unroll it into a loop. That is the reason
+we only support this limited form of recursion in our source language.
+We provide the frame, including all basic blocks and SSA phi functions
+for recursive calls from within the function body, i.e. (after translation)
+jumps back to the begin of the loop body (via a separate continue block SPIR-V needs)
+from within the loop body.
+
+\medskip
+\begin{tabularx}{\linewidth}{rl}
+	I.expr &= (rec-func\: ($id_1 \dots id_n$) e) \\
+	I.args &= ((ndefs, $e_1 \dots e_n$)) \\
+	\\
+	hb &:= I.idc + 0 \\
+	lb &:= I.idc + 1 \\
+	cb &:= I.idc + 2 \\
+	mb &:= I.idc + 3 \\
+	$O_0$ &:= \{idc: I.idc + 4\} \\
+	$O_i\dots$ &:= translate(\{expr: $e_i$, defs: ndefs, args: $\varnothing$, idc: $O_{i - 1}$.idc, idl: I.idl, rec: $\varnothing$\}) \dots \\
+	$D_b$ &:= ioa(I.defs, ($id_i$ $\mapsto$ (genexpr($O_n.idc$ + i, $O_i$.type)), I.defs)\dots) \\
+	$O_b$ &:= translate(\{expr: e, defs: $D_b$, idc: $O_n.idc + 2n$, idl: lb, rec: cb\}) \\
+	\\
+	$O_b$.type &= Rec $\tau$ \\
+	$O_b$.rec &= $((block_1, bid_1^1 \dots bid_n^1) \dots (block_m, bid_1^m \dots bid_n^m))$ \\
+	\\
+	O.rec &= $\varnothing$ \\
+	O.consts &= $O_b$.consts $O_i$.consts\dots \\
+	O.ido &= $O_b$.ido \\
+	O.idl &= mb \\
+	O.type &= $\tau$
+\end{tabularx}
+
+\medskip
+
+Furthermore, $O.code$ is defined as: \\
+\begin{tabularx}{\linewidth}{rll}
+	&OpBranch hb \\
+	&$O_i$.code & \textbf{[for i = 1..n]} \\
+	\cline{1-2}
+	hb = &OpLabel \\
+	($O_n$.idc + i) = &OpPhi\: typeid($O_i$.type) $O_i$.ido $I$.idl ($O_n$.idc + n + i) cb & \textbf{[for i = 1..n]} \\
+	&OpLoopMerge mb cb None \\
+	&OpBranch lb \\
+	\cline{1-2}
+	lb = &OpLabel \\
+	&$O_b$.code \\
+	&OpBranch mb \\
+	\cline{1-2}
+	cb = &OpLabel \\
+	($O_n$.idc + n + i) = &OpPhi typeid($O_n$) & \textbf{[for i = 1..n]} \\
+		&\quad $block_k$ $bid_i^k$ & $\quad$\textbf{[for k = 1..m]} \\
+	&OpBranch hb \\
+	\cline{1-2}
+	mb = &OpLabel
+\end{tabularx}
+
+
+\subsection{Translation: rec}
+
+The definition of this \textit{rec} translation only makes sense together
+with the translation of \textit{rec-func}. Interesting here is that
+this translation does not return a value or block ID (dummy value 0) in 
+O.ido, O.idl, since neither is defined.
+For well-typed expressions this will never again be needed during
+the translation since the result of this expression can't be used
+anyways, that is the idea of tail recursion.
+With our current type system, every \textit{rec} expression must be wrapped
+immediately into an \textit{if} expression.
+
+\medskip
+\begin{tabularx}{\linewidth}{rl}
+	I.expr &= rec \\
+	I.args &= ((ndefs, $e_1$\dots$e_n$)) \\
+	$O_0$ &= \{idc: I.idc\} \\
+	$O_i$ &= translate(\{expr: $e_i$, defs: ndefs, args: $\varnothing$, idc: $O_{i - 1}$.idc, idl: I.idl, rec: $\varnothing$\}) \dots \\
+	\\
+	O.idc &= $O_n$.idc \\
+	O.ido &= 0 \\ 
+	O.idl &= 0 \\
+	O.type &= PureRec \\
+	O.consts &= $O_i.consts$ \dots \\
+	O.code &= $O_i.code$\dots \: OpBranch I.rec \\
+\end{tabularx}
+
+\subsection{Translation: genexpr}
+
+We needed this additional expression alternative $genexpr(ID, \tau)$ to
+realize \textit{rec-func} parameters. Their translation is straightforward,
+we simply return the already generated ID.
+
+\medskip
+\begin{tabularx}{\linewidth}{rl}
+	I.expr &= genexpr($id_e$, $\tau_e$) \\
+	I.args &= $\varnothing$ \\
+	O &= \{code: $\varnothing$, consts: $\varnothing$, ido: id, idc: I.idc, idl: I.idl, type: $\tau_e$, rec: $\varnothing$\} \\
+\end{tabularx}
+
+\subsection{Translation to program}
+
+TODO: describe how a translated expression is wrapped to generate a valid
+spirv module. Introduce \textit{startid}, \textit{startblock}.
+
+\section{Correctness}
+
+We want to prove whole program correctness. Valid programs are expressions
+that are well-typed with no recursive context and no arguments and
+have a type $\tau_o$ that qualifies as observation, i.e. $Vec(i, f)$, since only
+those values can be returned (written into a framebuffer) by a fragment shader.
+We furthermore define the utility function
+$init_S: (C \times \vi) \rightarrow M $ that returns
+a SPIR-V memory object initialized with the constants from $C$ and the 
+block mappings from the full-program vector given in the $\vi$ argument.
+Another utility function $eval_S: (M \times ID) \rightarrow Vec(1, f)$
+models the full evaluation of the program loaded into the present SPIR-V
+memory and returns the observation mapped to the given ID after
+program execution according to the SPIR-V operational semantics we
+outlined. It basically starts execution at the block \textit{startblock}
+and applies the rules from the SPIR-V operational semantics until
+no instructions are left and then returns the value present in the
+memory for the given ID.
+
+The correctness theorem looks like this:
+
+\begin{center}
+\fbox{\begin{minipage}{0.9\textwidth}
+	When we have a well-typed program $e$ with 
+	$\varnothing, \varnothing \vdash e : \tau_o$ and 
+	$eval_\lambda(e) = o$ in $\lambda$V and 
+	$translate(\{expr: e, defs: \varnothing, args: \varnothing, idc: \textit{startid}, idl: \textit{startblock}, rec: \varnothing\}) = O$,
+	then $eval_S(init_S(O.consts, O.code), O.ido) = o$.
+\end{minipage}}
+\end{center}
+
+\end{document}
