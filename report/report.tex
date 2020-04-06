@@ -472,6 +472,10 @@ is important here since it significantly modifies the semantics of
 those builtins in SPIR-V. Otherwise we would transitively introduce a lot of
 undefined behavior in our source language.
 
+% TODO: give example!
+% TODO: either adapt the list reduction rule below again
+%  or somehow evaluate parameters of builtins! won't work otherwise
+
 % TODO: nope, this is a big pile of bullshit. Actually take the time to
 % model undefined behavior in source and target language (and
 % add the respective checks to the translation). Point out that
@@ -502,8 +506,8 @@ The conversion semantics are fairly simple due to our general list syntax:
 \end{prooftree}
 
 \begin{prooftree}
-	\AxiomC{$\vdash e_i \conv e_i'$}
-	\UnaryInfC{$\vdash (\dots e_i \dots) \conv (\dots e_i' \dots)$}
+	\AxiomC{$\vdash e_0 \conv e_0'$}
+	\UnaryInfC{$\vdash (e_0 \dots) \conv (e_0' \dots)$}
 \end{prooftree}
 
 Reduction semantics:
@@ -700,7 +704,7 @@ an atomic expression such as $(func \dots)$ or a builtin. \\
 \begin{tabularx}{\linewidth}{rl}
 	I.expr &= ($e_0$ $e_1$ \dots $e_n$) \\
 	nargs &:= (I.args, (I.defs, $e_1$\dots$e_n$)) \\
-	O &= translate(\{expr: $e_0$: I.defs, args: nargs, idc: I.idc, idl: I.idl, rec: I.rec\}) \\
+	O &= translate(\{expr: $e_0$, defs: I.defs, args: nargs, idc: I.idc, idl: I.idl, rec: I.rec\}) \\
 \end{tabularx}
 
 \subsection{Translation: if}
@@ -905,5 +909,97 @@ The correctness theorem looks like this:
 	then $eval_S(init_S(O.consts, O.code), O.ido) = o$.
 \end{minipage}}
 \end{center}
+
+We proof this by induction over the well-typedness, i.e. the type
+derivation tree of expression $e$. We can start with the simple
+cases, even without additional Lemmas.
+
+\subsection{Correctness: numbers}
+
+When $e$ is a number \textit{num} it obviously evaluates to itself
+as observation. Looking up its translation rule, we see that it translates
+to no code at all. But since $eval_S(init_S(O.consts, O.code), O.ido)$
+returns the value of $O.ido$ --- in case of the translation of a constant that's simply
+the ID we gave the constant --- in the memory after execution --- which
+in our case is the same memory as before the execution --- we simply
+get \textit{num} since that's the constant we added in our translation,
+that gets loaded into initial memory by $init_S$.
+We could trivially formalize this proof given formalizations of 
+$eval_S$ and $init_S$ but the proof would just trivially look like
+described here.
+
+\subsection{Correctness: computations}
+
+Since we defined all builtins to just have the semantics of their
+SPIR-V counterparts (see the example for the operational semantics of OpFAdd,
+all we do is basically saying "this function behaves like specified in
+SPIR-V"), the correctness proof for those is trivial. We use the
+induction hypothesis for the arguments passed to the builtins.
+
+To formally prove this we would have to strengthen our induction
+argument, stating that $O.type$ is the same as the type of $e$ and that
+the $O.ido$ is a value of this type as well. Otherwise we can't guarantee 
+that the types actually match and that the instruction is valid.
+But this can be verified separately or via a Lemma by just looking at
+each translation rule.
+
+% \subsection{Correctness: reduction lemma}
+% 
+% When $e$ reduces to $e'$
+
+\subsection{Correctness: list}
+
+% TODO: we don't actually need the operational semantics here?!
+When $e$ is a list of form $(e_0 e_1 \dots e_n)$ and $e_0$ can be reduced
+to $e_0'$, the operational semantics specify that $e$ can be reduced to
+$(e_0' e_1 \dots e_n)$. Furthermore, given our typing rule "t-app",
+we can inductively assume the correctness theorem for $e_0$ with arguments
+$(e_1 \dots e_n)$. Here, we once again have to strengthen our induction
+argument to argue about arguments: When an expression $e$ is only
+well-typed under arguments $((e_1^1 \dots e_1^{n_1}) \dots (e_m^1 \dots e_m^{n_m}))$,
+then the evaluations of a translation with any arguments 
+$((d_1, (g_1^1 \dots g_1^{n_1})) \dots (d_m, (g_m^1 \dots g_m^{n_m})))$
+so that (for all i = $1..m$; for all k in $1..n_i$) $g_i^k$ with all identifier
+mappings from $d_i$ substituted is the same as $e_i^k$ must evaluate
+to the same as $((\dots(e\: e_m^1 \dots e_m^{n_m}) \dots) e_1^1 \dots e_1^{n_1})$.
+
+Given the translation rule for list and our induction hypothesis
+given by the type derivation, we know that the correctness theorem
+holds for $e_0$ with arguments $e_1 \dots e_n$, meaning its translation
+evaluates to the same as $e_0$ with those arguments.
+% TODO: not a clear proof
+% TODO: what about value replacements except the first?
+% need to re-add that to rules
+
+\subsection{Correctness: let}
+
+Now $e$ is of form $(let (\dots(id_i e_i)\dots) e_b)$. 
+Per induction hypothesis and type rule we can assume our correctness argument
+for $e$ with substituted identifiers. To show that this substitution
+is the same as adding the definitions to our $I.defs$ mapping that
+we translate $e_b$ with (i.e. what our translation does), we define a Lemma:
+
+\textbf{Lemma subst-def}: The translation of $(e[r(e_1) / id_1]\dots[r(e_n) / id_n])$
+(we write $r(e_i)$ to denote the expression $e_i$ with all identifiers
+known to the current context --- the $defs$ of the translation --- replaced
+by their definitions) with definitions $defs$ evaluates to
+the same value as the translation of $e$ with
+definitions $ioa(defs, (id_i \mapsto (e_i, defs)) \dots)$. This Lemma
+% should be obvious, given that the whole purpose of $defs$ in our
+% translation is to perform substituion the same way we define it formally
+% (assuming that identifiers never shadow, i.e. giving each scope
+% its own names). It could be formally proven via induction over $e$.
+is only needed because we chose to model translation closely
+to how it can be implemented instead of relying on ``magical''
+context sensitive substitution. It should be easy to proof using
+induction over $e$, the only interesting rule being the
+identifiers for which the equality should be obvious, given that
+we just substitute/replace at different times.
+
+\subsection{Correctness: func}
+
+\subsection{Correctness: rec-func and rec}
+
+
 
 \end{document}
