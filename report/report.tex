@@ -658,7 +658,7 @@ the restrictions outlined in the beginning).
 \begin{tabularx}{\linewidth}{rl}
 	I.expr &= (func ($id_1 \dots id_n$) e) \\
 	I.args &= ($A_r$, (ndefs, $e_1 \dots e_n$)) \\
-	ndefs &:= ioa(I.defs, ($id_i \mapsto e_i$), ndefs)\dots) \\
+	ndefs &:= ioa(I.defs, ($id_i \mapsto (e_i$, I.defs))\dots) \\
 	O &= translate(\{expr: e, defs: ndefs, args: $A_r$, idc: I.idc, idl: I.idl, rec: I.rec\}) \\
 \end{tabularx}
 
@@ -666,7 +666,7 @@ the restrictions outlined in the beginning).
 
 \begin{tabularx}{\linewidth}{rl}
 	I.expr &= identifier \\
-	I.defs(identifier) &= (e, ndefs) \\
+	I.defs(identifier) &= (e, I.defs) \\
 	O &= translate(\{expr: e, defs: ndefs, args: I.args, idc: I.idc, idl: I.idl, rec: I.rec\}) \\
 \end{tabularx}
 
@@ -691,7 +691,7 @@ constant definition (in O.consts) and return the id of the constant.
 
 \begin{tabularx}{\linewidth}{rl}
 	I.expr &= (let (($id_1 e_1) \dots (id_n e_n)$) e) \\
-	ndefs &:= ioa(I.defs, ($id_i \mapsto e_i$), I.defs)\dots) \\
+	ndefs &:= ioa(I.defs, ($id_i \mapsto e_i$, I.defs))\dots) \\
 	O &= translate(\{expr: e, defs: ndefs, args: I.args, idc: I.idc, idl: I.idl, rec: I.rec\}) \\
 \end{tabularx}
 
@@ -899,6 +899,11 @@ and applies the rules from the SPIR-V operational semantics until
 no instructions are left and then returns the value present in the
 memory for the given ID.
 
+Another utility function to connect definitions and substitution:
+$subst: (e \times D) \rightarrow e$ is defined as
+$e[e_i \ id_i]\dots$ for every $id_i \mapsto e_i$ mapping in the
+given definitions mapping.
+
 The correctness theorem looks like this:
 
 \begin{center}
@@ -906,6 +911,20 @@ The correctness theorem looks like this:
 	When we have a well-typed program $e$ with 
 	$\varnothing, \varnothing \vdash e : \tau_o$ and 
 	$eval_\lambda(e) = o$ in $\lambda$V and 
+	$translate(\{expr: e, defs: \varnothing, args: \varnothing, idc: \textit{startid}, idl: \textit{startblock}, rec: \varnothing\}) = O$,
+	then $eval_S(init_S(O.consts, O.code), O.ido) = o$.
+\end{minipage}}
+\end{center}
+
+To actually prove this we need to strengthen the induction argument,
+accounting for arguments and types:
+
+\begin{center}
+\fbox{\begin{minipage}{0.9\textwidth}
+	When we have a well-typed program $e$ with 
+	$\varnothing, ((e_1^1 \dots) \dots (e_n^1 \dots)) \vdash e : \tau$ and 
+	$eval_\lambda(e) = o$ in $\lambda$V and (for any D $defs$ and any 
+	A $((d_1, (a_1^1 \dots)), \dots, (d_n, (a_n^1 \dots)))$ so that )
 	$translate(\{expr: e, defs: \varnothing, args: \varnothing, idc: \textit{startid}, idl: \textit{startblock}, rec: \varnothing\}) = O$,
 	then $eval_S(init_S(O.consts, O.code), O.ido) = o$.
 \end{minipage}}
@@ -951,7 +970,7 @@ each translation rule.
 \subsection{Correctness: list}
 
 % TODO: we don't actually need the operational semantics here?!
-When $e$ is a list of form $(e_0 e_1 \dots e_n)$ and $e_0$ can be reduced
+When $e$ is a list of form $(e_0\: e_1 \dots e_n)$ and $e_0$ can be reduced
 to $e_0'$, the operational semantics specify that $e$ can be reduced to
 $(e_0' e_1 \dots e_n)$. Furthermore, given our typing rule "t-app",
 we can inductively assume the correctness theorem for $e_0$ with arguments
@@ -974,12 +993,13 @@ evaluates to the same as $e_0$ with those arguments.
 
 \subsection{Correctness: let}
 
-Now $e$ is of form $(let (\dots(id_i e_i)\dots) e_b)$. 
+Now $e$ is of form $(let\: (\dots(id_i\: e_i)\dots)\: e_b)$. 
 Per induction hypothesis and type rule we can assume our correctness argument
 for $e$ with substituted identifiers. To show that this substitution
 is the same as adding the definitions to our $I.defs$ mapping that
 we translate $e_b$ with (i.e. what our translation does), we define a Lemma:
 
+\medskip
 \textbf{Lemma subst-def}: The translation of $(e[r(e_1) / id_1]\dots[r(e_n) / id_n])$
 (we write $r(e_i)$ to denote the expression $e_i$ with all identifiers
 known to the current context --- the $defs$ of the translation --- replaced
@@ -992,10 +1012,22 @@ definitions $ioa(defs, (id_i \mapsto (e_i, defs)) \dots)$. This Lemma
 % its own names). It could be formally proven via induction over $e$.
 is only needed because we chose to model translation closely
 to how it can be implemented instead of relying on ``magical''
-context sensitive substitution. It should be easy to proof using
+context sensitive substitution. It should be possible to prove using
 induction over $e$, the only interesting rule being the
 identifiers for which the equality should be obvious, given that
 we just substitute/replace at different times.
+\medskip
+
+So per induction hypothesis we know that $eval_\lambda(e[e_i / id_i]\dots)$
+is the same as the evaluation of the translation in SPIR-V (technically
+we have to apply the current arguments from our strengthened induction
+argument to both). But our Lemma gives us that the translation of
+$e[e_i / id_i]\dots$ evaluates to the same value as $e$ translated with
+$id_i \mapsto e_i\dots$ definitions, which is exactly how
+we defined the \textit{let} translation. Furthermore, our operational
+semantics give us that $(let\: (\dots(id_i\: e_i)\dots)\: e_b)$ can
+be reduced to $e_b[e_i / id_i]\dots$, i.e. they both evaluate to
+the same value.
 
 \subsection{Correctness: func}
 
