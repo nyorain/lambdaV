@@ -200,7 +200,7 @@ this specification. But checking whether an operation might overflow
 SPIR-V give their implementations some freedom regarding
 rounding of values returned by computations).
 
-I couldn't actually find a solution for this yet. I tried to get
+I couldn't find a good solution for this. I tried to get
 a clarification on this section in the Vulkan spec and found I was not
 the first person confused about it, see \href{https://github.com/KhronosGroup/Vulkan-Docs/issues/961}{Vulkan-Docs issue 961}.
 Possible solutions included these:
@@ -220,13 +220,23 @@ Possible solutions included these:
 		and definitely not a sane solution to me.
 	\item Just outputting SPIR-V 1.4 (or using the previously available
 		extension) and requiring support for this flag. That is what
-		I went with in the end since my hardware supports it and it
-		makes a big issue just go away, basically. Now, most computations
-		don't ever trigger any undefined behavior.
+		is assumed in the rest of this report and what will probably
+		be used in the final implementation of the compiler since my hardware
+		supports it and it makes a big issue just go away, basically. 
+		Most computations don't ever trigger any undefined behavior
+		anymore.
 \end{itemize}
 
 There are still some instructions, however, that trigger undefined
-behavior.
+behavior. As mentioned in the introduction, we would optimally like
+to have \textit{debug} mode of binaries in which triggering
+undefined behavior is somehow signaled, helping the programmer
+to remove it from programs, even if the implementation they are using
+just happens to implement the undefined behavior that does not
+result in any problems. But for now, our source language just inherits
+the undefined behavior conditions of SPIR-V. In our conclusion we
+go into some detail on a better way to make undefined behavior
+observable in SPIR-V in general.
 
 \subsection{Ignored instructions}
 
@@ -1275,5 +1285,18 @@ It would be interesting to see if there are optimizations it cannot perform
 that could instead be done in our compiler. On the other hand, using additional
 (unverified) optimization passes obviously might mess with the outlined correctness
 of our compiler.
+
+Furthermore, our SPIR-V binaries (like the output of all shader languages
+known to me) can contain undefined behavior. I want to look
+into a general SPIR-V compiler pass that just transforms binaries
+into a \textit{debug} mode, inserting runtime checks for
+undefined behavior conditions, writing
+detected problems to a storage buffer object (e.g. writing
+an ID associated with the condition and the source location).
+There already exists a framework for SPIR-V compiler/optimization passes (that even
+implements outputting debug values to a storage buffer) in the SPIRV-Tools 
+project repository~\footnote{https://github.com/KhronosGroup/SPIRV-Tools} (of
+which \textit{spirv-opt} is a part which could probably be easily extended 
+by this kind of pass.
 
 \end{document}
