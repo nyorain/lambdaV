@@ -32,17 +32,19 @@ assembly language for GPU shaders and kernels.
 
 The idea of using functional concepts in a shader came from the fact
 that shaders usually have a small and well-defined set of inputs
-and outputs and can therefore be written as mostly pure computations.
+and outputs and can therefore mostly be written as pure computations.
+
 Originally, another personal motivation for developing a shader language
 translatable to SPIR-V was that existing shader languages have some properties
 that are undesirable in certain contexts. For instance, to optimize
-shaders for performance (which obviously makes sense) many operations
-(or: programming errors) like accessing an array or input out-of-bounds, but
-even normalizing a zero-length vector or computations involving infinity
+shaders for performance many operations
+(read: programming errors) like accessing an array or input out-of-bounds, but
+even normalizing a zero-length vector or any computations involving infinity
 are undefined in certain contexts and environments. In practice, this
-undefinedness is unobservable in some implementations while it leads to
-major errors on other implementations, making development and debugging
-extremely hard. The idea was to develop a language that guarantees to
+undefinedness is often unobservable in some implementations (leading to no
+error) while it leads to major errors on other implementations, making development 
+and debugging for all implementations hard.
+The idea was to develop a language that guarantees to
 make undefined behavior observable (e.g. by always checking for undefined
 behavior conditions at runtime and write output to a buffer should
 they be fulfilled). This obviously comes at a potentially huge and
@@ -50,13 +52,68 @@ unacceptable runtime cost and brings no advantage for shipped application
 but could be quite useful in a development environment, making sure
 that shader programs don't trigger undefined behavior.
 During the development of this language I realized though that this
-is better realized as a completely separate SPIR-V-only pass since it
+is better implemented as a completely separate SPIR-V-only pass since it
 doesn't depend at all on anything in the source language. Regarding
 the correctness proof of the compiler it is furthermore not too interesting,
 since it would just introduce additional branches for builtin operations.
 The following sections hint at it a couple of times but in the end I only describe
 the translation from our source language to SPIR-V, adopting their
 (or the runtime's) notions of undefined behavior.
+
+During this project I found that SPIR-V does not have defined operational
+semantics and even the statements regarding undefined behavior (which are
+mainly specified by the runtime environments like Vulkan or OpenCL
+and not SPIR-V itsefl) weren't completely unambiguous.
+
+\subsection{Example}
+
+The most simple valid program we can write is a fragment
+shader (i.e. the type of program executed for each pixel~\footnote{This is
+an oversimplification but enough for the basic understanding} of a
+rasterized primitive) just writing a constant color.
+In our shader language it just looks like this, writing the
+color opaque yellow in this case:
+
+\begin{lstlisting}
+(vec4 1.0 1.0 0.0 1.0)
+\end{lstlisting}
+
+\noindent It translates to the following program by our compiler:
+
+\begin{lstlisting}
+               OpCapability Shader
+          %3 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Fragment %1 "main" %16
+               OpExecutionMode %1 OriginUpperLeft
+               OpDecorate %16 Location 0
+      %float = OpTypeFloat 32
+       %void = OpTypeVoid
+    %v4float = OpTypeVector %float 4
+       %bool = OpTypeBool
+          %2 = OpTypeFunction %void
+       %true = OpConstantTrue %bool
+      %false = OpConstantFalse %bool
+    %float_1 = OpConstant %float 1
+  %float_1_0 = OpConstant %float 1
+    %float_0 = OpConstant %float 0
+  %float_1_1 = OpConstant %float 1
+%_ptr_Output_v4float = OpTypePointer Output %v4float
+         %16 = OpVariable %_ptr_Output_v4float Output
+          %1 = OpFunction %void None %2
+         %10 = OpLabel
+         %15 = OpCompositeConstruct %v4float %float_1 %float_1_0 %float_0 %float_1_1
+               OpStore %16 %15
+               OpReturn
+               OpFunctionEnd
+\end{lstlisting}
+
+A huge part of this is header and wrapper code we always generate
+(and constants, not part of the main program). In this case,
+the only interesting instruction (besides the defined constants)
+is the creation of the vector value via OpCompositeConstruct into
+SPIR-V ID 15, everything else is (more or less) always generated like
+this.
 
 \section{Source language: $\lambda$V}
 
@@ -65,11 +122,14 @@ To keep proofs and formalization minimal, we will only look at a simple
 version of $\lambda$V (basically already a subset of what I implemented~\footnote{See 
 \url{https://github.com/nyorain/lambdaV} for my experiments with implementing
 a real compiler, a lot of the formal proof here is actually quite close
-to the compiler source code}): \\
+to the compiler source code. It supports multiple outputs, and
+define statements, i.e. a program can consist of more than one
+expression}): \\
 We only look at fragment shaders and only allow a single observation:
 one output to the framebuffer. This isn't too much of a simplification
-for fragment shaders and modeling writes to multiple framebuffer attachments
-as well as inputs shouldn't be too difficult but just more writing work.
+for realistic fragment shaders and modeling writes to multiple framebuffer attachments
+as well as inputs shouldn't be too difficult but require some complications
+to our formalization.
 Similarly, there isn't a huge difference to other shader types (such as 
 vertex or compute shaders) except that those usually produce more or
 different observations and therefore one just once again needs to model the
@@ -94,7 +154,8 @@ the advantage that writing a parser and AST representation is extremely trivial.
 \section{The target language: SPIR-V}
 
 SPIR-V~\footnote{\url{https://www.khronos.org/registry/spir-v/specs/unified1/SPIRV.html}}
-is an SSA-form abstract typed assembly language. It has
+is an SSA-form~\footnote{See \url{https://en.wikipedia.org/wiki/Static_single_assignment_form}}
+abstract typed assembly language. It has
 similarities to LLVM IR but is more limited: no dynamic dispatch,
 i.e. no function pointers, no memory allocations, no stack frame and
 most runtimes (i.e. where SPIR-V modules can be used as shaders or
@@ -106,23 +167,28 @@ It's specification does not give operational semantics - or
 any formal specification - at all but rather describes the layout 
 and semantics in plain text. To formally argue about correctness we need 
 to model at least some form of operational semantics though. We will
-only consider the subset of SPIR-V used by our compiler though.
-For instance, our compiler never output any functions (apart from the
+only consider the subset of SPIR-V used by our compiler.
+For instance, our compiler never outputs any functions (apart from the
 main entrypoint) so we don't care for that.
 
-Our judgment looks like this: $M, \vi, ID, ID \rightarrow M, \vi, ID, ID$.
+We define SPIR-V execution state like this $S := (M, \vi, ID, ID)$ \\
 $ID$ is a SPIR-V identifier, i.e. just a number.
-$M$ is of the form $[id \mapsto V] ... $ the memory and maps IDs to values. Values can be 
+$M$ is of the memory of form $[id \mapsto V] ... $ and maps IDs to values. Values can be 
 \begin{itemize}
 	\item instruction blocks of form $\vi$
-	\item values of form $(V, \tau)$, where the second value is the type,
+	\item values of form $(V, \tau)$, where $V$ the first value is a
+		a primitive (number, vector, matrix, bool) and $\tau$
+		a type for this value.
 	% \item type expressions, declaring new types. For instance $Float(i)$,
 	% 	declaring a floating point type of $i$ bits or $Vec(t, c)$,
 	% 	declaring a vector type of scalar type $t$ with $c$ components.
 \end{itemize}
 $\vi$ is an instruction vector.
-Furthermore, the function has inputs and outputs for the current and previous
-block IDs, this is needed to resolve SSA phi instructions.
+Furthermore, our state contains the current and previous block IDs,
+this is needed to resolve SSA phi~\footnote{See again \url{https://en.wikipedia.org/wiki/Static_single_assignment_form}}
+instructions.
+
+Our judgment looks like this: $S \rightarrow S$. \\
 
 We formally model execution of a (valid) SPIR-V module like this: when the module
 is loaded, all constants and types (declared in the header) are loaded
@@ -130,9 +196,11 @@ into a memory $M$. All instruction blocks are loaded into the memory as well,
 removing the first $OpLabel$ instruction that is only used to identify
 the blocks with an id.
 The header of the SPIR-V module defines the entry point function.
-Execution looks up the first block in the function (functions must start with 
-a label defining the block id) $(\vi_{entry}, id_{entry})$ and then behaves as specified
-by the operational semantics for $M, \vi_{entry}, id_{entry}, 0)$.
+Execution looks up the first block in the entry point function (functions must 
+start with a label defining the first block id) with instruction 
+vector $\vi_{entry}$ and block ID $id_{entry}$ and 
+then behaves as specified by the operational semantics
+for $M, \vi_{entry}, id_{entry}, 0$.
 
 We represent SPIR-V in the standard textual assembly format, with the new ID
 defined by the instruction (if any) on the left of the ``='' sign.
@@ -180,7 +248,7 @@ like this example we give for floating point addition:
 where $fadd$ simply encodes the semantics of the addition of two numbers.
 Interestingly enough, SPIR-V does not specify how overflow or special
 cases (infinity or NaN arguments) are handled. Instead, this is usually
-specified in the runtime environment. We can for instance look once again into the vulkan
+specified in the runtime environment. We can for instance look once again into the Vulkan
 specification. It specifies that ``By default, the implementation may 
 perform optimizations on half, single, or double-precision floating-point 
 instructions that ignore sign of a zero, or assume that arguments 
@@ -199,11 +267,10 @@ this specification. But checking whether an operation might overflow
 (or similar) is a pain (maybe not even possible, given that Vulkan and
 SPIR-V give their implementations some freedom regarding
 rounding of values returned by computations).
+Apparently, I'm also not the first person confused by this,
+see \href{https://github.com/KhronosGroup/Vulkan-Docs/issues/961}{Vulkan-Docs issue 961}.
 
-I couldn't find a good solution for this. I tried to get
-a clarification on this section in the Vulkan spec and found I was not
-the first person confused about it, see \href{https://github.com/KhronosGroup/Vulkan-Docs/issues/961}{Vulkan-Docs issue 961}.
-Possible solutions included these:
+Possible solutions to the problem include these:
 
 \begin{itemize}
 	\item Just make any overflow or similar undefined in the source language
@@ -221,7 +288,7 @@ Possible solutions included these:
 	\item Just outputting SPIR-V 1.4 (or using the previously available
 		extension) and requiring support for this flag. That is what
 		is assumed in the rest of this report and what will probably
-		be used in the final implementation of the compiler since my hardware
+		be used in the further implementation of the compiler since my hardware
 		supports it and it makes a big issue just go away, basically. 
 		Most computations don't ever trigger any undefined behavior
 		anymore.
@@ -232,7 +299,7 @@ behavior. As mentioned in the introduction, we would optimally like
 to have \textit{debug} mode of binaries in which triggering
 undefined behavior is somehow signaled, helping the programmer
 to remove it from programs, even if the implementation they are using
-just happens to implement the undefined behavior that does not
+just happens to implement the undefined behavior in a way that does not
 result in any problems. But for now, our source language just inherits
 the undefined behavior conditions of SPIR-V. In our conclusion we
 go into some detail on a better way to make undefined behavior
@@ -242,7 +309,7 @@ observable in SPIR-V in general.
 
 There are meta-instructions that must be inserted into a SPIR-V module
 for correcntess that don't have an impact on the semantics, like
-the OpSelectionMerge and OpLoopMerge that provide meta-information
+the OpSelectionMerge and OpLoopMerge instructions that provide meta-information
 about the control flow. Furthermore there are debug instructions,
 allowing to associate source-language line numbers or variables names with
 SPIR-V code. We simply ignore all those instructions, treating them
@@ -252,6 +319,104 @@ the same way we treat OpNop:
 	\AxiomC{}
 	\UnaryInfC{$M, (\text{OpNop}, \vi), c, p \rightarrow M, \vi, c, p$}
 \end{prooftree}
+
+\section{$\lambda$V operational semantics}
+
+To reason about correctness properties of our translation, we will define
+small-step operational semantics for $\lambda$V.
+
+\begin{prooftree}
+	\AxiomC{}
+	\UnaryInfC{$(let\:((id_1\:e_1)\dots(id_n\:e_n))\:e) \rightarrow e[e_1 / id_1]\dots[e_n / id_n]$}
+\end{prooftree}
+
+\begin{prooftree}
+	\AxiomC{}
+	\UnaryInfC{$(if\:true\:e_2\:e_3) \rightarrow e_2$}
+\end{prooftree}
+
+\begin{prooftree}
+	\AxiomC{}
+	\UnaryInfC{$(if\:false\:e_2\:e_3) \rightarrow e_3$}
+\end{prooftree}
+
+\begin{prooftree}
+	\AxiomC{}
+	\UnaryInfC{$((func\:(id_1 \dots id_n)\:e)\:e_1 \dots e_n) \rightarrow e[e_1 / id_1]\dots[e_n / id_n]$}
+\end{prooftree}
+
+\begin{prooftree}
+	\AxiomC{}
+	\UnaryInfC{$((\text{rec-func}\:(id_1 \dots id_n)\:e)\:e_1 \dots e_n) \rightarrow e[e_1 / id_1]\dots[e_n / id_n][(\text{rec-func}\:(id_1 \dots id_n)\:e) / rec]$}
+\end{prooftree}
+
+The reduction rule for builtins are intuitively defined, just copying
+the underlying SPIR-V (and target environment, e.g. Vulkan) semantics,
+which in turn usually just refer to the IEEE floating point standard.
+
+The design decision we made for handling the (by default ill-defined)
+issues like overflow, infinities and NaN's in Section \ref{sec:computations}
+is important here since it significantly modifies the semantics of
+those builtins in SPIR-V. Otherwise we would transitively introduce a lot of
+undefined behavior in our source language.
+
+% TODO: give example!
+% TODO: either adapt the list reduction rule below again
+%  or somehow evaluate parameters of builtins! won't work otherwise
+
+% TODO: nope, this is a big pile of bullshit. Actually take the time to
+% model undefined behavior in source and target language (and
+% add the respective checks to the translation). Point out that
+% this is something we just do in our formal model and not in the
+% actual compiler because just using an extra, translation- and
+% source lanauge independent SPIR-V pass makes more sense?
+% But to be honest, then why even mention it here at all?
+% Maybe just explain this in the motivation and leave it out of this?
+% But definitely say something about it here!
+
+%% A goal of our compiler is to make undefined behavior observable but I
+%% found trying to prove this quite pointless. We can model undefined
+%% behavior in the target language and add some kind of extra observation
+%% for this to our operational semantics of the source language. But this
+%% makes everything more complicated while not really helping to establish
+%% trust in anything, since the main point of every proof would be us
+%% identifying each and every source of undefined behavior in the
+%% SPIR-V prose-specification.
+
+\newcommand{\conv}{\rightarrow^+}
+\newcommand{\red}{\rightarrow^*}
+
+The conversion semantics are fairly simple due to our general list syntax:
+
+\begin{prooftree}
+	\AxiomC{$\vdash e \rightarrow e'$}
+	\UnaryInfC{$\vdash e \conv e'$}
+\end{prooftree}
+
+\begin{prooftree}
+	\AxiomC{$\vdash e_0 \conv e_0'$}
+	\UnaryInfC{$\vdash (e_0 \dots) \conv (e_0' \dots)$}
+\end{prooftree}
+
+Reduction semantics:
+
+\begin{prooftree}
+	\AxiomC{}
+	\UnaryInfC{$\vdash e \red e$}
+\end{prooftree}
+
+\begin{prooftree}
+	\AxiomC{$\vdash e \conv e''$}
+	\AxiomC{$\vdash e'' \red e'$}
+	\BinaryInfC{$\vdash e \red e'$}
+\end{prooftree}
+
+As usually, we define a evaluation function, $eval_\lambda(e) = o$,
+that is defined as the observation $o$ that $e$ can be reduced to.
+All possible observations in our simplified version of the source language
+is a single $Vec(I,f)$, the value written to the framebuffer by the
+fragment shader.
+
 
 
 \section{Types in $\lambda$V}
@@ -268,9 +433,9 @@ point numbers, we just assume all numbers to be floating-point for simplicity
 and since GPUs are usually optimized for that anyways. For logical true and
 false, we have Bool. Then, we have various Vector and Matrix types (with
 dimensions 2, 3 or 4 and floating point ``f'' or boolean ``b'' elements).
-We simplicity, we only allow square-sized matrices at the moment, other
+For simplicity, we only allow square-sized matrices at the moment, other
 ones are rarely needed in shaders anyways. 
-The types $Rec \tau$ and $PureRec$ have nothing to do with
+The types $Rec\: \tau$ and $PureRec$ have nothing to do with
 recursive types but are just helper types that
 allow us to model the restriction we have to put on recursive functions
 (namely: only tail-recursion is allowed) while still deducing the types of
@@ -278,7 +443,7 @@ recursive expressions. This is probably the only interesting thing about
 the type system. How exactly the types are used should become apparent from
 the typing rules below.
 To allow minimizing the number of rules and distinct cases, we will
-write $Vec(1, {b,f})$ as synonym for $Bool$ or $Num$, respectively.
+write $Vec(1, \{b,f\})$ as synonym for $Bool$ or $Num$, respectively.
 
 Our typing judgment has the following form: \\
 \begin{center}
@@ -289,13 +454,15 @@ Our typing judgment has the following form: \\
 \end{minipage}}
 \end{center}
 
-$R$ is a \textit{recursive context}, as explained below.
+$R$ is a \textit{recursive context}, holding the types of the
+arguments in the current recursive frames, $R ::= \tau*$.
 $A$ is a tuple of tuple of expressions, representing the current
-stack of call arguments.
+stack of call arguments, $A ::= (e*)*$.
 Both $R$ and $A$ are basically needed as workaround for not typing
 functions while allowing them in almost any context (there are some
 technical limitations discussed below).
-A typing judgement means that $e$ is of type $\tau$ (in context $R$).
+A typing judgement means that $e$ is of type $\tau$, with arguments
+$A$ and in recursive context $R$.
 We also use $T, U$ as type metavariables.
 [I guess this is fairly common but for tuples we write $((a_1 \dots), a_2)$
 for $(a_1 \dots a_2)$, i.e. appending to a tuple].
@@ -363,7 +530,7 @@ Substituion is assumed to be context-sensitive (i.e. only substitute those
 identifiers that are really meant in that case and not those that are
 redefined in a deeper scope), as usually.
 
-The helper function \textit{rec-match} combines two different types in a
+The helper function \textit{rec-match} combines two related types in a
 recursive context. 
 
 \[
@@ -469,103 +636,6 @@ This allows us to just give one generic rule for all of those builtins:
 	\BinaryInfC{$R, \varnothing \vdash (builtin\:e_1 \dots e_n) : \tau$}
 \end{prooftree}
 
-
-\section{$\lambda$V operational semantics}
-
-To reason about correctness properties of our translation, we will define
-small-step operational semantics for $\lambda$V.
-
-\begin{prooftree}
-	\AxiomC{}
-	\UnaryInfC{$(let\:((id_1\:e_1)\dots(id_n\:e_n))\:e) \rightarrow e[e_1 / id_1]\dots[e_n / id_n]$}
-\end{prooftree}
-
-\begin{prooftree}
-	\AxiomC{}
-	\UnaryInfC{$(if\:true\:e_2\:e_3) \rightarrow e_2$}
-\end{prooftree}
-
-\begin{prooftree}
-	\AxiomC{}
-	\UnaryInfC{$(if\:false\:e_2\:e_3) \rightarrow e_3$}
-\end{prooftree}
-
-\begin{prooftree}
-	\AxiomC{}
-	\UnaryInfC{$((func\:(id_1 \dots id_n)\:e)\:e_1 \dots e_n) \rightarrow e[e_1 / id_1]\dots[e_n / id_n]$}
-\end{prooftree}
-
-\begin{prooftree}
-	\AxiomC{}
-	\UnaryInfC{$((\text{rec-func}\:(id_1 \dots id_n)\:e)\:e_1 \dots e_n) \rightarrow e[e_1 / id_1]\dots[e_n / id_n][(\text{rec-func}\:(id_1 \dots id_n)\:e) / rec]$}
-\end{prooftree}
-
-The reduction rule for builtins are intuitively defined, just copying
-the underlying SPIR-V (and target environment, e.g. Vulkan) semantics,
-which in turn usually just refer to the IEEE floating point standard.
-
-The design decision we made for handling the (by default ill-defined)
-issues like overflow, infinities and NaN's in Section \ref{sec:computations}
-is important here since it significantly modifies the semantics of
-those builtins in SPIR-V. Otherwise we would transitively introduce a lot of
-undefined behavior in our source language.
-
-% TODO: give example!
-% TODO: either adapt the list reduction rule below again
-%  or somehow evaluate parameters of builtins! won't work otherwise
-
-% TODO: nope, this is a big pile of bullshit. Actually take the time to
-% model undefined behavior in source and target language (and
-% add the respective checks to the translation). Point out that
-% this is something we just do in our formal model and not in the
-% actual compiler because just using an extra, translation- and
-% source lanauge independent SPIR-V pass makes more sense?
-% But to be honest, then why even mention it here at all?
-% Maybe just explain this in the motivation and leave it out of this?
-% But definitely say something about it here!
-
-%% A goal of our compiler is to make undefined behavior observable but I
-%% found trying to prove this quite pointless. We can model undefined
-%% behavior in the target language and add some kind of extra observation
-%% for this to our operational semantics of the source language. But this
-%% makes everything more complicated while not really helping to establish
-%% trust in anything, since the main point of every proof would be us
-%% identifying each and every source of undefined behavior in the
-%% SPIR-V prose-specification.
-
-\newcommand{\conv}{\rightarrow^+}
-\newcommand{\red}{\rightarrow^*}
-
-The conversion semantics are fairly simple due to our general list syntax:
-
-\begin{prooftree}
-	\AxiomC{$\vdash e \rightarrow e'$}
-	\UnaryInfC{$\vdash e \conv e'$}
-\end{prooftree}
-
-\begin{prooftree}
-	\AxiomC{$\vdash e_0 \conv e_0'$}
-	\UnaryInfC{$\vdash (e_0 \dots) \conv (e_0' \dots)$}
-\end{prooftree}
-
-Reduction semantics:
-
-\begin{prooftree}
-	\AxiomC{}
-	\UnaryInfC{$\vdash e \red e$}
-\end{prooftree}
-
-\begin{prooftree}
-	\AxiomC{$\vdash e \conv e''$}
-	\AxiomC{$\vdash e'' \red e'$}
-	\BinaryInfC{$\vdash e \red e'$}
-\end{prooftree}
-
-As usually, we define a evaluation function, $eval_\lambda(e) = o$,
-that is defined as the observation $o$ that $e$ can be reduced to.
-All possible observations in our simplified version of the source language
-is a single $Vec(I,f)$, the value written to the framebuffer by the
-fragment shader.
 
 \section{Translation}
 
