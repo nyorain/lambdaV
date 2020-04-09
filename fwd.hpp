@@ -85,6 +85,10 @@ struct Codegen {
 		u32 tbool {};
 	} types;
 
+	struct {
+		u32 fragCoord;
+	} inputs;
+
 	struct Output {
 		u32 id;
 		u32 location;

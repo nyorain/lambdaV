@@ -640,6 +640,24 @@ GenExpr generateGlslUnary(const RecContext& ctx, const Location& loc,
 	return {oid, ctx.codegen.types.tbool, PrimitiveType::eBool};
 }
 
+// TODO: allow to use this as a predefined identifier as opposed
+// to a zero-argument function?
+GenExpr generateFragCoord(const RecContext& ctx, const Location& loc,
+		const std::vector<CallArgs>& args) {
+	if(args.size() != 1) {
+		throwError("Invalid call nesting", loc);
+	}
+
+	if(args[0].values->size() != 1) {
+		throwError("frag-coord expects no arguments", loc);
+	}
+
+	auto oid = ++ctx.codegen.id;
+	write(ctx.codegen.buf, spv::OpLoad, ctx.codegen.types.tvec4, oid,
+		ctx.codegen.inputs.fragCoord);
+	return {oid, ctx.codegen.types.tvec4, VectorType{4, PrimitiveType::eFloat}};
+}
+
 const std::unordered_map<std::string_view, BuiltinGen> builtins = {
 	// core: control-flow/bindings
 	{"if", generateIf},
@@ -661,6 +679,8 @@ const std::unordered_map<std::string_view, BuiltinGen> builtins = {
 	{"eq", generateEq},
 	{"and", generateLogicalBin<spv::OpLogicalAnd>},
 	{"or", generateLogicalBin<spv::OpLogicalOr>},
+
+	{"frag-coord", generateFragCoord},
 
 	// types
 	{"vec4", generateVec4},
@@ -809,6 +829,9 @@ void init(Codegen& ctx) {
 	ctx.types.tvec4 = ++ctx.id;
 	ctx.types.tbool = ++ctx.id;
 
+	// TODO: only generate when used?
+	ctx.inputs.fragCoord = ++ctx.id;
+
 	// entry point function
 	write(ctx.buf, spv::OpFunction, ctx.types.tvoid, ctx.idmain,
 		spv::FunctionControlMaskNone, ctx.idmaintype);
@@ -842,6 +865,7 @@ std::vector<u32> finish(Codegen& ctx) {
 		spv::MemoryModelGLSL450);
 
 	std::vector<u32> interface;
+	interface.push_back(ctx.inputs.fragCoord);
 	for(auto& output : ctx.outputs) {
 		interface.push_back(output.id);
 	}
@@ -861,6 +885,15 @@ std::vector<u32> finish(Codegen& ctx) {
 
 	write(sec9, spv::OpConstantTrue, ctx.types.tbool, ctx.idtrue);
 	write(sec9, spv::OpConstantFalse, ctx.types.tbool, ctx.idfalse);
+
+	// inputs
+	auto tid = ++ctx.id;
+	write(sec9, spv::OpTypePointer, tid,
+		spv::StorageClassInput, ctx.types.tvec4);
+	write(sec9, spv::OpVariable, tid, ctx.inputs.fragCoord,
+			spv::StorageClassInput);
+	write(sec8, spv::OpDecorate, ctx.inputs.fragCoord, spv::DecorationBuiltIn,
+		spv::BuiltInFragCoord);
 
 	// back-patch the missed global stuff
 	for(auto& constant : ctx.constants) {
