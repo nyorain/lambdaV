@@ -19,7 +19,7 @@
 
 \lstset{ 
 	basicstyle=\footnotesize,
-	tabsize=2,
+	tabsize=4,
 }
 
 \begin{document}
@@ -68,11 +68,11 @@ and not SPIR-V itsefl) weren't completely unambiguous.
 \subsection{Example}
 
 The most simple valid program we can write is a fragment
-shader (i.e. the type of program executed for each pixel~\footnote{This is
-an oversimplification but enough for the basic understanding} of a
-rasterized primitive) just writing a constant color.
+shader (i.e. the type of program executed for each pixel~\footnote{Slight
+oversimplification} of a
+rasterized primitive) just outputting a constant color.
 In our shader language it just looks like this, writing the
-color opaque yellow in this case:
+color opaque yellow (as RGBA tuple) in this case:
 
 \begin{lstlisting}
 (vec4 1.0 1.0 0.0 1.0)
@@ -352,7 +352,7 @@ small-step operational semantics for $\lambda$V.
 
 The reduction rule for builtins are intuitively defined, just copying
 the underlying SPIR-V (and target environment, e.g. Vulkan) semantics,
-which in turn usually just refer to the IEEE floating point standard.
+which in turn often just refer to the IEEE floating point standard.
 
 The design decision we made for handling the (by default ill-defined)
 issues like overflow, infinities and NaN's in Section \ref{sec:computations}
@@ -389,26 +389,26 @@ undefined behavior in our source language.
 The conversion semantics are fairly simple due to our general list syntax:
 
 \begin{prooftree}
-	\AxiomC{$\vdash e \rightarrow e'$}
-	\UnaryInfC{$\vdash e \conv e'$}
+	\AxiomC{$e \rightarrow e'$}
+	\UnaryInfC{$e \conv e'$}
 \end{prooftree}
 
 \begin{prooftree}
-	\AxiomC{$\vdash e_0 \conv e_0'$}
-	\UnaryInfC{$\vdash (e_0 \dots) \conv (e_0' \dots)$}
+	\AxiomC{$e_i \conv e_i'$}
+	\UnaryInfC{$(\dots e_i \dots) \conv (\dots e_i' \dots)$}
 \end{prooftree}
 
 Reduction semantics:
 
 \begin{prooftree}
 	\AxiomC{}
-	\UnaryInfC{$\vdash e \red e$}
+	\UnaryInfC{$e \red e$}
 \end{prooftree}
 
 \begin{prooftree}
-	\AxiomC{$\vdash e \conv e''$}
-	\AxiomC{$\vdash e'' \red e'$}
-	\BinaryInfC{$\vdash e \red e'$}
+	\AxiomC{$e \conv e''$}
+	\AxiomC{$e'' \red e'$}
+	\BinaryInfC{$e \red e'$}
 \end{prooftree}
 
 As usually, we define a evaluation function, $eval_\lambda(e) = o$,
@@ -464,8 +464,8 @@ technical limitations discussed below).
 A typing judgement means that $e$ is of type $\tau$, with arguments
 $A$ and in recursive context $R$.
 We also use $T, U$ as type metavariables.
-[I guess this is fairly common but for tuples we write $((a_1 \dots), a_2)$
-for $(a_1 \dots a_2)$, i.e. appending to a tuple].
+[I guess this is fairly common but for tuples we write $((a_1 \dots a_n), b)$
+for $(a_1 \dots a_n, b)$, i.e. appending to a tuple].
 
 \begin{prooftree}
 	t-num
@@ -550,7 +550,7 @@ recursive context.
 when we have an \textit{if} expression where one branch just results
 in a \textit{rec} call, i.e. having type \textit{PureRec} while the
 the other branch contains a  value of type $\tau$ (or $Rec\: \tau$), we can deduce 
-that the function must return a value of type $\tau$ in general.
+that the expression must be of type $\tau$ in general.
 But instead of giving this \textit{if} expression then the type $\tau$,
 we give it the type $Rec\: \tau$ since the returned value can't be used
 for any further computations (except control flow, at the moment this
@@ -571,7 +571,7 @@ In practice, we could put a more relaxed restriction on our type system:
 It is allowed to call recursive functions with function values as long
 as all recursive calls use the same function value. Or even more general:
 As long as there is only a finite number of functions used in the
-recursive calls (meaning basically that you recurse with newly
+recursive calls (meaning basically that you just cannot recurse with newly
 instantianted functions in each recursion, it should be somewhat intuitive
 that a case like that can't be inlined/unrolled anymore). But that
 is a much more complicated restriction, yields a more complex type system
@@ -592,8 +592,8 @@ For instance:
 One can use function value parameters in recursive functions
 by simply defining a non-recursive wrapper function.
 
-The author did not know about the Curry paradox and functional
-recursive combinators (maybe he shouldn't have picked a functional source language)
+I did not know about the Curry paradox and functional
+recursive combinators (maybe I shouldn't have picked a functional source language)
 and one can write recursive expressions like that in $\lambda$V as well.
 Below is a (simple) example showing how simple $func$ constructs can
 be (ab-)used to get recursion.
@@ -614,6 +614,7 @@ from whether or not the expression actually terminates).
 In short: we expect programmers to play nice and use the \textit{rec-func}
 construct we provide since we can't support arbitrary recursion. Sadly.
 
+\medskip
 There are furtheremore a lot of more uninteresting typing rules for
 the builtin primitives such as arithmetic or trigonometric functions.
 We annotate those builtins with types (just some examples in the list below):
@@ -627,22 +628,22 @@ We annotate those builtins with types (just some examples in the list below):
 	\item $Vec(I,T) \times Vec(I,T) \rightarrow Vec(I,b)$, e.g. less-than or equal
 \end{itemize}
 
-Note that the generic $i$ must be the same for all parameters/return types.
-This allows us to just give one generic rule for all of those builtins:
+Note that the generic $I$ or $T$ must be the same for all parameters/return
+types in one signature. This allows us to just give one generic rule 
+for all of those builtins:
 
 \begin{prooftree}
 	\AxiomC{$builtin$ of type $(\tau_1 \dots \tau_n) \rightarrow \tau$}
 	\AxiomC{$\varnothing, \varnothing \vdash e_i : \tau_i$}
-	\BinaryInfC{$R, \varnothing \vdash (builtin\:e_1 \dots e_n) : \tau$}
+	\BinaryInfC{$R, ((e_1 \dots e_n)) \vdash builtin : \tau$}
 \end{prooftree}
 
 
 \section{Translation}
 
 We model translation as a recursive function \textit{translate}.
-We use the usual structure (unordered tuples where each value
-instead gets a name) and member-access notation to keep things
-somewhat compact.
+We use a structure notation (unordered tuples where each value
+instead gets a name) to keep things somewhat compact.
 
 \begin{center}
 \fbox{\begin{minipage}{15em}
@@ -650,7 +651,7 @@ somewhat compact.
 		% R_i &::= \{hb: ID, cb: ID\} \\
 		BackEdge &::= (ID, ID*) \\
 		GE &::= (ID, \tau) \\
-		R_i &::= {defs: identifier \rightarrow GE, cont: ID} \\
+		R_i &::= \{defs: identifier \rightarrow GE, cont: ID\} \\
 		R_o &::= BackEdge* \\
 		ID &::= \text{SPIR-V numeral ID} \\
 		A &::= (ce*)* \\
@@ -667,16 +668,18 @@ somewhat compact.
 \end{minipage}}
 \end{center}
 
-\textbf{Input.expr} is simply the expression to be translated. We extend expressions
-by an intermediate type generated during translation, an already translation
-expression holding its ID and its type. \\
+\noindent \textbf{Input.expr} is simply the expression to be translated. \\
+% We extend expressions
+% by an intermediate type generated during translation, an already translation
+% expression holding its ID and its type. \\
 \textbf{Input.rec} and \textbf{Output.rec} are information needed to generate recursive
 functions. Inside a \textit{rec-func} construct, \textbf{Input.rec} is the block 
 ID of the continue block (to jump to) and the IDs as well as types (bundled into
 our new GE type) for the recursive function arguments. \\
 %, as well as the type IDs of its parameters.
 \textbf{Output.rec} is a set of blocks and their respective parameter IDs for
-recursvie calls (i.e. edges to the continue block). \\
+recursvie calls (i.e. edges to the continue block). This is needed to
+generate correct OpPhi instructions in the translation of \textit{rec-func}. \\
 \textbf{Input.args} models the current argument call stack, pretty much the same
 way we modeled it for our typing rules. This is once again needed because
 we can't translate function expressions on their own. \\
@@ -691,24 +694,21 @@ uses IDs 42, 43, 44 and 45, it returns 46 as $Output.idc$. \\
 \textbf{Output.idl} is the label the code generation finishes in.
 This is different iff code generation inserts a new $OpLabel$ instruction,
 i.e. starting a new basic block. \\
-
 % There is one input and one output ($id_c$)
 % to the translation function for the next usable id (e.g. if a translation of an
 % expression gets 42 as input, uses IDs 43, 44 and 45, it returns 46).
 % The $id_o$ output is the ID the value generated by the expression is stored in.
 % The $id_t$ output is the type ID of the generated expression.
-
-\textit{Output.consts} is a set of defined constant instructions. In SPIR-V constants
+\textbf{Output.consts} is a vector of defined constants, mapping
+allocated SPIR-V IDs to numbers. In SPIR-V, constants
 cannot be defined inline but have to be defined in a special section before
-the start of the program, that's why keep them as a separate vector.
-
-\textit{Output.type} is the type of the generated expression.
-
-Finally, \textit{Output.code} is the generated SPIR-V instruction vector.
+the start of the program, that's why keep them as a separate vector. \\
+\textbf{Output.type} is the type of the generated expression. \\
+\textbf{Output.code} is the generated SPIR-V instruction vector.
 
 \subsection{Translation: utility}
 
-We define the function as a set of conditions in which $translate(I) = O$
+We define the translation function as a set of conditions in which $translate(I) = O$
 is defined. The next sections will present a set of conditions for each
 expression, you can basically imagine each section being one (giant)
 derivation rule for the defining judgment $translate(I) = O$
@@ -718,13 +718,13 @@ When generating the SPIR-V module from a full $\lambda$V program,
 we define all types in the header (giving them IDs) and can therefore define a
 function $typeid: \tau \rightarrow ID$ that returns the SPIR-V type ID
 associated with a given type in our formalization. 
-We define $typeid(Rec \tau) = typeid(\tau)$. The expression $typeid(PureRec)$
+We define $typeid(Rec\: \tau) = typeid(\tau)$. The expression $typeid(PureRec)$
 is intentionally undefined, it is never needed for well-defined programs.
 Similar to the way we declare types once and can then use them via their
 IDs during the translation, we also define the constants $true$ and $false$
 once and are able to use them during translation. Their translation
-rules are not shown below since they are therefore trivial (basically
-a no-op, just returning the ID of the respective constant).
+rules are not shown below since they are therefore trivial (no generated
+code, just returning the ID of the respective constant with type bool).
 
 We also need a utility function $ioa$, modeling
 the \textit{insert or assign} semantic of a mapping (in our compiler
@@ -747,20 +747,22 @@ insertion/replacement, \\
 \subsection{Translation: func}
 
 This is probably the most interesting (and yet one the most simple) translation
-rules: to translate a function call we simply translate its body
+rule: to translate a function call we simply translate its body
 (effectively always inlining the function) and replace all occurrences of 
 function parameter with translations of the expressions bound to them.
-Of course, this might lead to code bloat, when huge functions or complex expression passes
-as paremters are inlined. This compiler doesn't care too much and
-separate optimization passes can still perform common subexpression
+This obviously only works since expressions can't have any side-effects.
+Of course, this might lead to code bloat, when huge functions or complex expression 
+passed as paremters are inlined. Our compiler doesn't care.
+Separate optimization passes can still perform common subexpression
 elimination or similar (they could technically even refactor code that
 is generated multiple times out into its own function, if possible).
 The reason we translate functions (or rather: function calls; we can't translate
-function in itself, remember how they are not even valid expressions since
-not typed at all) like this even though SPIR-V offers functions is that
-there is no dynamic dispatch in SPIR-V. Therefore force-inlining basically
+functions in itself, remember how they are not even well-typed expressions
+in itself) like this even though SPIR-V offers functions is that
+there is no dynamic dispatch in SPIR-V. Therefore force-inlining
 everything is the only way to get higher-order functions (well, with
-the restrictions outlined in the beginning).
+the restrictions outlined in the typing section, no higher-order functions
+passed to or returned from recursive functions).
 
 \medskip
 \begin{tabularx}{\linewidth}{rl}
@@ -781,6 +783,7 @@ constant definition (in O.consts) and return the id of the constant.
 	O.code &= $\varnothing$ \\
 	O.consts &= [I.idc $\mapsto$ \textit{num}] \\
 	O.idc &= I.idc + 1 \\
+	O.ido &= I.idc \\
 	O.type &= Num \\
 	O.idl &= I.idl \\
 	O.rec &= $\varnothing$ \\
@@ -788,6 +791,12 @@ constant definition (in O.consts) and return the id of the constant.
 
 \subsection{Translation: let}
 
+This is almost the same as the translation of \textit{func}.
+In $\lambda$V, \textit{let} constructs can basically be seen
+as \textit{func} calls with the expressions bound to the identifiers
+as arguments.
+
+\medskip
 \begin{tabularx}{\linewidth}{rl}
 	I.expr &= (let (($id_1 e_1) \dots (id_n e_n)$) e) \\
 	O &= translate(\{expr: $e[e_1 / id_1]\dots[e_n / id_n]$, args: I.args, idc: I.idc, idl: I.idl, rec: I.rec\}) \\
@@ -795,8 +804,8 @@ constant definition (in O.consts) and return the id of the constant.
 
 \subsection{Translation: list}
 
-This translation rule is only useful (and well-defined) when $e_0$ isn't
-an atomic expression such as $func$ or a builtin. \\
+This utility translation rule is only useful (and well-defined) when $e_0$ isn't
+an atomic expression such as \textit{func} or a builtin. \\
 
 \medskip
 \begin{tabularx}{\linewidth}{rl}
@@ -814,15 +823,15 @@ given branches is just a recursive call (i.e. of type $PureRec$).
 \medskip
 \begin{tabularx}{\linewidth}{rl}
 	I.expr &= (if $e_c$ $e_t$ $e_f$) \\
-	$O_c$ &= translate(\{expr: $e_c$, args: I.args, idc: I.idc + 4, idl: I.idl, rec: I.rec\}) \\
-	$O_t$ &= translate(\{expr: $e_t$, args: I.args, idc: $O_c$.idc, idl: I.idc + 0, rec: I.rec\}) \\
-	$O_f$ &= translate(\{expr: $e_f$, args: I.args, idc: $O_f$.idc, idl: I.idc + 1, rec: I.rec\}) \\
+	$O_c$ &:= translate(\{expr: $e_c$, args: I.args, idc: I.idc + 4, idl: I.idl, rec: I.rec\}) \\
+	$O_t$ &:= translate(\{expr: $e_t$, args: I.args, idc: $O_c$.idc, idl: I.idc + 0, rec: I.rec\}) \\
+	$O_f$ &:= translate(\{expr: $e_f$, args: I.args, idc: $O_f$.idc, idl: I.idc + 1, rec: I.rec\}) \\
 
-	O.consts &= consts: $O_c$.consts $O_t$.consts $O_f$.consts \\
+	O.consts &= $O_c$.consts $O_t$.consts $O_f$.consts \\
 	O.ido &= 
 	$\begin{cases}
 		0 & \text{for } O_f.type = PureRec \land O_t.type = PureRec \\
-		I.idc + 4 & \text{otherwise} \\
+		I.idc + 3 & \text{otherwise} \\
 	\end{cases}$ \\
 
 	O.idl &= 
@@ -871,14 +880,15 @@ For instance, a translation of the ``vec4'' builtin, using
 \begin{tabularx}{\linewidth}{rl}
 	I.expr &= vec4 \\
 	I.args &= (($e_1$ $e_2$ $e_3$ $e_4$)) \\
-	$O_0$ &= \{idc: I.idc + 1\} \\
-	$O_i$ &= translate(\{expr: $e_i$, args: $\varnothing$, idc: $O_{i - 1}$.idc, idl: I.idl, rec: I.rec\}) \dots \\
+	$O_0$ &:= \{idc: I.idc + 1\} \\
+	$O_i$ &:= translate(\{expr: $e_i$, args: $\varnothing$, idc: $O_{i - 1}$.idc, idl: I.idl, rec: I.rec\}) \dots \\
 	O.idc &= $O_4$.idc \\
-	O.ido &= I.idc + 1 \\
+	O.ido &= I.idc \\
+	O.idl &= I.idl \\
 	O.type &= Vec(4, f) \\
 	O.rec &= $\varnothing$ \\
 	O.consts &= $O_i.consts$ \dots \\
-	O.code &= (I.idc + 1) = OpCompositeConstruct typeid(Vec(4, f)) $O_1$.ido $O_2$.ido $O_3$.ido $O_4$.ido \\
+	O.code &= (I.idc = OpCompositeConstruct typeid(Vec(4, f)) $O_1$.ido $O_2$.ido $O_3$.ido $O_4$.ido) \\
 \end{tabularx}
 
 \newpage
@@ -890,7 +900,7 @@ don't have a stack) we have to unroll it into a loop. That is the reason
 we only support this limited form of recursion in our source language.
 We provide the frame, including all basic blocks and SSA phi functions
 for recursive calls from within the function body, i.e. (after translation)
-jumps back to the begin of the loop body (via a separate continue block SPIR-V needs)
+branches back to the begin of the loop body (via a separate continue block SPIR-V requires)
 from within the loop body.
 
 \medskip
@@ -903,9 +913,9 @@ from within the loop body.
 	cb &:= I.idc + 2 \\
 	mb &:= I.idc + 3 \\
 	$O_0$ &:= \{idc: I.idc + 4\} \\
-	$O_i\dots$ &:= translate(\{expr: $e_i$, args: $\varnothing$, idc: $O_{i - 1}$.idc, idl: I.idl, rec: I.rec\}) \dots \\
+	$O_i$ &:= translate(\{expr: $e_i$, args: $\varnothing$, idc: $O_{i - 1}$.idc, idl: I.idl, rec: I.rec\}) \dots \\
 	$D_b$ &:= ioa(I.rec.defs, ($id_i$ $\mapsto$ ($O_n.idc$ + i, $O_i$.type))\dots) \\
-	$O_b$ &:= translate(\{expr: e, idc: $O_n.idc + 2n$, idl: lb, rec: {cont: cb, defs: $D_b$}\}) \\
+	$O_b$ &:= translate(\{expr: e, idc: $O_n.idc + 2n$, idl: lb, rec: \{cont: cb, defs: $D_b$\}\}) \\
 	\\
 	$O_b$.type &= Rec $\tau$ \\
 	$O_b$.rec &= $((block_1, bid_1^1 \dots bid_n^1) \dots (block_m, bid_1^m \dots bid_n^m))$ \\
@@ -914,6 +924,7 @@ from within the loop body.
 	O.consts &= $O_b$.consts $O_i$.consts\dots \\
 	O.ido &= $O_b$.ido \\
 	O.idl &= mb \\
+	O.idc &= $O_b$.idc \\
 	O.type &= $\tau$
 \end{tabularx}
 
@@ -934,8 +945,8 @@ Furthermore, $O.code$ is defined as: \\
 	&OpBranch mb \\
 	\cline{1-2}
 	cb = &OpLabel \\
-	($O_n$.idc + n + i) = &OpPhi typeid($O_n$) & \textbf{[for i = 1..n]} \\
-		&\quad $block_k$ $bid_i^k$ & $\quad$\textbf{[for k = 1..m]} \\
+	($O_n$.idc + n + i) = &OpPhi typeid($O_i$.type) & \textbf{[for i = 1..n]} \\
+		&\quad $bid_i^k$ $block_k$ & $\quad$\textbf{[for k = 1..m]} \\
 	&OpBranch hb \\
 	\cline{1-2}
 	mb = &OpLabel
@@ -972,7 +983,7 @@ immediately into an \textit{if} expression.
 
 \subsection{Translation: identifier}
 
-We replace all identifiers except the function parameters in \textit{rec-func}
+We already substitute all identifiers during translation except the function parameters in \textit{rec-func}
 constructs, since those cannot be replaced by source-lanauge expressions
 but must simply use the results from the \textit{OpPhi} instructions
 in the beginning of the \textit{rec-func} loop body.
@@ -981,7 +992,7 @@ in the beginning of the \textit{rec-func} loop body.
 \begin{tabularx}{\linewidth}{rl}
 	I.expr &= \textit{identifier} \\
 	I.args &= $\varnothing$ \\
-	I.rec(\textit{identifier}) &= (\textit{ido}, \textit{tau}) \\
+	I.rec.defs(\textit{identifier}) &= (\textit{ido}, $\tau$) \\
 	O &= \{code: $\varnothing$, consts: $\varnothing$, ido: ido, idc: I.idc, idl: I.idl, type: $\tau$, rec: $\varnothing$\} \\
 \end{tabularx}
 
@@ -1003,7 +1014,7 @@ We statically use IDs for types and the entry block. We therefore
 define the first usable ID (i.e. the number of IDs we statically use in
 the header + 1) as \textit{startid} and the ID of the first basic
 block (\textit{OpLabel}) in our main function as \textit{startblock}.
-Both of these are required in the translation of our source
+Both of these are required as input to the translation of our source
 expression.
 
 \section{Correctness}
@@ -1021,7 +1032,7 @@ We furthermore define the utility function
 $init_S: (C \times \vi) \rightarrow M $ that returns
 a SPIR-V memory object initialized with the constants from $C$ and the 
 block mappings from the full-program vector given in the $\vi$ argument.
-Another utility function $eval_S: (M \times ID) \rightarrow Vec(1, f)$
+Another utility function $eval_S: (M \times ID) \rightarrow Vec(i, f)$
 models the full evaluation of the program loaded into the present SPIR-V
 memory and returns the observation mapped to the given ID after
 program execution according to the SPIR-V operational semantics we
@@ -1030,10 +1041,10 @@ and applies the rules from the SPIR-V operational semantics until
 no instructions are left and then returns the value present in the
 memory for the given ID.
 
-Another utility function to connect definitions and substitution:
-$subst: (e \times D) \rightarrow e$ is defined as
-$e[e_i \ id_i]\dots$ for every $id_i \mapsto e_i$ mapping in the
-given definitions mapping.
+% Another utility function to connect definitions and substitution:
+% $subst: (e \times D) \rightarrow e$ is defined as
+% $e[e_i \ id_i]\dots$ for every $id_i \mapsto e_i$ mapping in the
+% given definitions mapping.
 
 The correctness theorem looks like this:
 
@@ -1044,7 +1055,7 @@ The correctness theorem looks like this:
 	$\varnothing, \varnothing \vdash e : \tau_o$ and  \\
 	$eval_\lambda(e) = o$ in $\lambda$V and  \\
 	$translate(\{expr: e, args: \varnothing, idc: \textit{startid}, idl: \textit{startblock}, rec: \varnothing\}) = O$, \\
-	then $eval_S(init_S(O.consts, O.code), O.ido) = o$.
+	\textbf{then} $eval_S(init_S(O.consts, O.code), O.ido) = o$.
 	\end{flushleft}
 \end{minipage}}
 \end{center}
@@ -1058,48 +1069,54 @@ accounting for arguments and types:
 	$\varnothing, ((e_1^1 \dots) \dots (e_n^1 \dots)) \vdash e : \tau$ and  \\
 	$eval_\lambda(((e\: e_n^1 \dots) \dots)e_1^1 \dots) = o$ in $\lambda$V and  \\
 	$translate(\{expr: e, args: ((e_1^1 \dots) \dots (e_n^1 \dots)), idc: \textit{startid}, idl: \textit{startblock}, rec: \varnothing\}) = O$, \\
-	\textbf{then} \\
-	$O.type = \tau$, \\
-	if $O.ido \neq 0$, it has type $idtype(\tau)$; \\
-	and $eval_S(init_S(O.consts, O.code), O.ido) = o$.
+	\textbf{then} $O.type = \tau$ and \\
+	if $O.ido \neq 0$, it has type $idtype(\tau)$, and \\
+	$eval_S(init_S(O.consts, O.code), O.ido) = o$.
 \end{minipage}}
 \end{center}
 \medskip
 
 We did not formally define the type system for SPIR-V but it should
-be obvious from its text specification. \\
-We prove this theorem by induction over the well-typedness, i.e. the type
-derivation tree of expression $e$. We can start with the simple
-cases, even without additional Lemmas.
+be obvious from its text specification. The set of types $\tau$ in SPIR-V
+we consider and the types in our source language 
+(not considering any \textit{Rec} or \textit{PureRec} type) can be considered isomorphic. \\
+
+\medskip
+We prove this correctness theorem by induction over the well-typedness, i.e. the type
+derivation tree of expression $e$. We start with the simple cases.
 
 \subsection{Correctness: numbers}
 
 When $e$ is a number \textit{num} it obviously evaluates to itself
 as observation. Looking up its translation rule, we see that it translates
-to no code at all. But since $eval_S(init_S(O.consts, O.code), O.ido)$
-returns the value of $O.ido$ --- in case of the translation of a constant that's simply
-the ID we gave the constant --- in the memory after execution --- which
+to no code at all. Since $eval_S(init_S(O.consts, O.code), O.ido)$
+returns the value of $O.ido$ in the memory after execution --- which
 in our case is the same memory as before the execution --- we simply
 get \textit{num} since that's the constant we added in our translation,
 that gets loaded into initial memory by $init_S$.
-We could trivially formalize this proof given formalizations of 
-$eval_S$ and $init_S$ but the proof would just trivially look like
-described here.
+% We could easily formalize this proof given formalizations of 
+% $eval_S$ and $init_S$.
 
 \subsection{Correctness: computations}
 
 Since we defined all builtins to just have the semantics of their
-SPIR-V counterparts (see the example for the operational semantics of OpFAdd,
-all we do is basically saying "this function behaves like specified in
-SPIR-V"), the correctness proof for those is trivial. We use the
+SPIR-V counterparts 
+% (see the example for the operational semantics of OpFAdd,
+% all we do is basically saying "this function behaves like specified in
+% SPIR-V")
+, the correctness proof for those is trivial. We use the
 induction hypothesis for the arguments passed to the builtins.
+We need our strengthened induction argument for the types here
+instead of the correctness theorem we started with to prove
+that the SPIR-V instruction is actually well-defined (its parameters
+having the expected types) and can be reduced.
 
-To formally prove this we would have to strengthen our induction
-argument, stating that $O.type$ is the same as the type of $e$ and that
-the $O.ido$ is a value of this type as well. Otherwise we can't guarantee 
-that the types actually match and that the instruction is valid.
-But this can be verified separately or via a Lemma by just looking at
-each translation rule.
+% To formally prove this we would have to strengthen our induction
+% argument, stating that $O.type$ is the same as the type of $e$ and that
+% the $O.ido$ is a value of this type as well. Otherwise we can't guarantee 
+% that the types actually match and that the instruction is valid.
+% But this can be verified separately or via a Lemma by just looking at
+% each translation rule.
 
 % \subsection{Correctness: reduction lemma}
 % 
@@ -1133,7 +1150,7 @@ Premises:
 \begin{itemize}
 	\item $e$ = $(e_0\: e_1 \dots e_n)$, well typed under arguments $A_r$
 	\item Per induction hypothesis (see typing rule \textit{t-app}), we
-		know that our strengthened theorem holds for $e_0$ with arguments
+		know that our theorem holds for $e_0$ with arguments
 		$(A_r, (e_1 \dots e_n))$.
 \end{itemize}
 
@@ -1143,7 +1160,7 @@ $e_0$ with new argument stack $(A_r, (e_1 \dots e_n))$). \\
 The proof for the correctness of the translation is immediately given transitively
 by our induction hypothesis, since $(e_0\: e_1 \dots e_n)$ with arguments 
 $A_r$ has the same type as $e_0$ with arguments $(A_r, (e_1 \dots e_n))$
-and furthermore $e$ with applied argument stack $A_r$ (as seen in the
+and furthermore $e$ with applied argument stack $A_r$ (as seen in the $eval_\lambda$
 premise of our strengthened theorem) is syntactically
 exactly the same as $e_0$ with unwrapped argument stack $(A_r, (e_1 \dots e_n))$,
 meaning they both obviously evaluate to the same observation.
@@ -1154,8 +1171,8 @@ Premises:
 \begin{itemize}
 	\item $e$ = $(func\: (id_1 \dots id_n)\: e_b)$, well typed
 		under arguments $(A_r, (e_1 \dots e_n))$
-	\item Per induction hypothesis (see typing rule \textit{t-app}), we
-		know that our strengthened theorem holds for $e_b[e_1 / id_1]\dots[e_n / id_n]$ with arguments
+	\item Per induction hypothesis (see typing rule \textit{t-func}), we
+		know that our theorem holds for $e_b[e_1 / id_1]\dots[e_n / id_n]$ with arguments
 		$(A_r)$.
 \end{itemize}
 
@@ -1174,13 +1191,13 @@ Premises:
 \begin{itemize}
 	\item $e$ = $(let\: (\dots(id_i\: e_i)\dots)\: e_b)$, well typed
 		under arguments $A$
-	\item Per induction hypothesis our strengthened theoerem
+	\item Per induction hypothesis our theoerem
 		holds for $e_b[e_i / id_i]\dots$, with the same arguments $A$
 \end{itemize}
 
 Our translation once again allows us to directly use the induction
 hypothesis to prove correctness, since we simply translate it to
-the translation of $e_b[e_i / id_i]\dots$ with the same argument.
+the translation of $e_b[e_i / id_i]\dots$ with the same arguments.
 The operational semantics give us that $e$ can be reduced to
 $e_b[e_i / id_i]\dots$ i.e. both evaluate to the same value.
 The typeing rules guarantee us that both have the same type.
@@ -1208,12 +1225,11 @@ Our premises:
 \begin{itemize}
 	\item $e$ = (if $e_c$ $e_t$ $e_f$), well typed under arguments
 		$((e_1^1\dots)\dots(e_n^1\dots))$.
-	\item Per induction hypothesis we can assume the correctness
+	\item Per induction hypothesis and typing rules we can assume the
 		theorem for $e_c$, $e_t$ and $e_f$
 	\item There are two possible cases for the reduction of $e$:
-		if $e_c$ evaluates to true, $e$ evaluates to whatever
-		$e_t$ evaluates to otherwise whatever $e_f$ evaluates to
-		(given the arguments)
+		if $e_c$ evaluates to true, $e$ reduces to $e_t$, otherwise 
+		$e_f$ (given the same arguments).
 \end{itemize}
 
 We step through the code generated by the translation of $e$ using
@@ -1228,11 +1244,16 @@ in our reduction, as previously described.
 If $O_c$.ido was true, we will execute $O_t$.code, otherwise
 $O_f$.code. Per induction hypothesis, both are guaranteed to load
 the observation $eval_\lambda(e_t)$ (or $eval_\lambda(e_f)$, respectively)
-into $O_t$.ido (or $O_f$.ido, respectively), assuming that the types of the
-branch expressions are not \textit{PureRec} (we get to that case below).
+into $O_t$.ido (or $O_f$.ido, respectively), assuming that the type of the
+respective branch expression is not \textit{PureRec} (we get to that case below).
 After that, control always branches to the block \textit{I.idc + 2}.
 All that is done there is to select the computed value via an \textit{OpPhi}
-instruction. This value is the return value of the translation. \\
+instruction. This value is the return value of the translation. Given
+the operational semantics of \textit{OpPhi}, the value in memory
+returned by this translation must be the same as the one the selected
+branch evaluates to, which corresponds per operational semantics rule
+for \textit{if} in our source language to the value our whole expression
+should evaluate to. \\
 
 If one of the branch expressions is of type PureRec, that means per
 typing rules that it is (potentially nested in some called \textit{func}
@@ -1253,7 +1274,7 @@ When either of the branches is not of type \textit{PureRec}, a new
 ID will be returned as output, defined by the \textit{OpPhi} instruction
 in the last block. This instruction is of type \textit{typeid(O.type)}.
 Furthermore, it is well-defined since all passed parameters are
-of the same type (remember that $typeid(Rec \tau) = typeid(\tau)$),
+of the same type (remember that $typeid(Rec\: \tau) = typeid(\tau)$),
 that is guaranteed by our typing rules and the induction hypothesis
 applied to the (non-\textit{PureRec}) branch expressions.
 
@@ -1270,10 +1291,10 @@ Our premises:
 	\item The arguments for the well-typedness of $e$ are $((e_1 \dots e_n))$.
 	\item $e$ reduces to 
 		$e_b[e_1 / id_1]\dots[e_n / id_n][(\text{rec-func}\:(id_1 \dots id_n)\:e) / rec]$
-	\item Per induction hypothesis we know that our correctness theorem
+	\item Per induction hypothesis and typing rules we know that our theorem
 		holds for \\
 		$e_b[e_1 / id_1]\dots[e_n / id_n]$, translated with no arguments.
-	\item Per induction hypothesis we also know that our correctness theorem
+	\item Per induction hypothesis and typing rules we also know that our correctness theorem
 		holds for all the arguments $e_i$.
 \end{itemize}
 
@@ -1330,10 +1351,11 @@ a stack frame or dynamic dispatch.
 Initially, we modeled translation without using our ``magical'' 
 context-sensitive substitution. Instead, we used an additional
 translation input parameter holding all definitions and passing
-the environment for each argument tuple. While that was the last step to basically
+the environment (all known definitions) for each argument tuple. 
+While that was the last step to basically
 make translation just a one-to-one formal model of our code, it made
 the formalization much more complicated, requiring multiple helper functions,
-an additional strenghtening of our correctness induction hypothesis
+an additional strenghtening of our correctness induction argument
 and in the end everything just boiled down again to a Lemma saying that
 translation of an expression with mappings given in the ``definitions''
 argument is the same as just substituting them. \\
@@ -1352,21 +1374,23 @@ for SPIR-V binaries are able to minimize the code bloat and performance
 problems introduced by our translation.
 The \textit{spirv-opt} program delivered promising results in first experiments.
 It would be interesting to see if there are optimizations it cannot perform
-that could instead be done in our compiler. On the other hand, using additional
-(unverified) optimization passes obviously might mess with the outlined correctness
-of our compiler.
+that could instead be done in our compiler (such as actually using SPIR-V
+functions and pre-evaluating arguments where possible, i.e. when functions 
+are not of higher order). 
+On the other hand, using additional (unverified) optimization passes obviously 
+might mess with the outlined correctness of our compiler.
 
-Furthermore, our SPIR-V binaries (like the output of all shader languages
-known to me) can contain undefined behavior. I want to look
-into a general SPIR-V compiler pass that just transforms binaries
+Furthermore, our SPIR-V binaries can contain undefined behavior. As previously
+outlined, I would be interesting to look into a general SPIR-V compiler 
+pass that just transforms binaries
 into a \textit{debug} mode, inserting runtime checks for
 undefined behavior conditions, writing
 detected problems to a storage buffer object (e.g. writing
 an ID associated with the condition and the source location).
 There already exists a framework for SPIR-V compiler/optimization passes (that even
 implements outputting debug values to a storage buffer) in the SPIRV-Tools 
-project repository~\footnote{https://github.com/KhronosGroup/SPIRV-Tools} (of
-which \textit{spirv-opt} is a part which could probably be easily extended 
+project repository~\footnote{\url{https://github.com/KhronosGroup/SPIRV-Tools},
+\textit{spirv-opt} is a part of this} which could probably be easily extended 
 by this kind of pass.
 
 \end{document}
